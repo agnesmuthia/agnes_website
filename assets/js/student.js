@@ -36,6 +36,15 @@ var Student = (function () {
 
   var loadGis = U.loadGis, jwtPayload = U.jwtPayload;
 
+  // Token Google siswa disimpan sementara di tab ini (hilang saat tab ditutup) supaya tidak perlu masuk ulang di tiap game.
+  function savedToken() {
+    var t = sessionStorage.getItem('gb_gtoken');
+    if (!t) return '';
+    var p = jwtPayload(t);
+    if (!(Number(p.exp) * 1000 > Date.now() + 120000)) { sessionStorage.removeItem('gb_gtoken'); return ''; }
+    return t;
+  }
+
   function loadProgress(code) { try { return JSON.parse(localStorage.getItem(progKey(code))); } catch (e) { return null; } }
   function persist() { if (S) localStorage.setItem(progKey(S.code), JSON.stringify(S)); }
 
@@ -61,18 +70,37 @@ var Student = (function () {
   function home() {
     cleanup();
     var st = savedStudent();
+    var loggedIn = !!Api.auth();
+    var who = sessionStorage.getItem('gb_temail');
     root().innerHTML = themed('galaxy',
-      '<header class="topbar"><div class="logo">🎮 <b>Game</b>Belajar</div><div class="row gap">' + muteBtn() +
-      '<a class="btn small ghost" href="#/guru">👩‍🏫 Masuk Guru</a></div></header>' +
+      '<header class="topbar"><div class="logo">🎮 <b>Game</b>Belajar</div><div class="row gap">' + muteBtn() + '</div></header>' +
       '<section class="hero">' +
       '<div class="hero-badge">Untuk siswa SMA ✨</div>' +
       '<h1 class="hero-title">Belajar jadi <span class="shine">seru</span>,<br>nilai jadi <span class="shine alt">juara!</span></h1>' +
-      '<p class="hero-sub">Masukkan kode game dari gurumu, lalu tunjukkan kemampuanmu!</p>' +
+      '<p class="hero-sub">Pilih jalur masukmu di bawah ini.</p>' +
+      '<div class="entry">' +
+
+      '<section class="entry-card glass" aria-labelledby="eh-s">' +
+      '<div class="entry-icon">🎮</div><h2 id="eh-s">Saya Siswa</h2>' +
+      '<p class="entry-sub">Masukkan kode game dari gurumu, lalu tunjukkan kemampuanmu!</p>' +
       '<form class="join-card" id="join">' +
       '<label for="code" class="sr-only">Kode game</label>' +
       '<input id="code" maxlength="6" autocomplete="off" placeholder="KODE GAME" value="' + esc(st.lastCode || '') + '" />' +
       '<button class="btn big glow" type="submit">Gabung ▶</button></form>' +
-      '<div class="chips"><span>⚡ Kuis kilat</span><span>🔗 Menjodohkan</span><span>🔢 Mengurutkan</span><span>🏆 Papan skor</span><span>🔥 Combo & XP</span></div>' +
+      '<p class="entry-note">🔐 Jika gurumu meminta login Google, tombol <b>Masuk dengan Google</b> muncul di langkah berikutnya, setelah kamu memasukkan kode.</p>' +
+      '</section>' +
+
+      '<section class="entry-card glass teacher" aria-labelledby="eh-g">' +
+      '<div class="entry-icon">👩‍🏫</div><h2 id="eh-g">Saya Guru</h2>' +
+      '<p class="entry-sub">Buat game, bagikan kode, lihat nilai, dan analisis kemajuan siswa.</p>' +
+      (loggedIn
+        ? '<a class="btn big glow full" href="#/guru">📊 Buka Dasbor Guru</a>' +
+          (who ? '<p class="entry-note">Masuk sebagai <b>' + esc(who) + '</b></p>' : '')
+        : '<div id="hgoogle" class="hgoogle" hidden><div id="hgbtn"></div><div class="or"><span>atau</span></div></div>' +
+          '<a class="btn big full" href="#/guru">🔑 Masuk dengan Kata Sandi</a>' +
+          '<p class="entry-note" id="hnote"></p>') +
+      '</section></div>' +
+      '<div class="chips"><span>⚡ Kuis kilat</span><span>🎈 Balon meletus</span><span>🔨 Pukul tikus</span><span>🎡 Roda putar</span><span>🏆 Papan skor</span></div>' +
       '</section>');
     bindMute(root());
     var input = $('#code');
@@ -84,6 +112,23 @@ var Student = (function () {
       U.sfx.click();
       location.hash = '#/main/' + c;
     };
+
+    if (loggedIn) return;
+    var note = $('#hnote');
+    if (Api.isLocal()) {
+      note.innerHTML = '💻 Mode Lokal: data hanya tersimpan di browser ini. <a href="#/guru/pengaturan">Hubungkan ke Google</a> agar siswa bisa bermain dari HP dan guru bisa masuk dengan Gmail.';
+      return;
+    }
+    Api.call('ping').then(function (r) {
+      if (!$('#hnote')) return;
+      if (r.googleClientId && window.Teacher) {
+        $('#hgoogle').hidden = false;
+        return Teacher.mountGoogleButton($('#hgbtn'), r.googleClientId, function () { location.hash = '#/guru'; });
+      }
+      $('#hnote').textContent = 'Login Gmail untuk guru aktif setelah Client ID disimpan di menu Pengaturan.';
+    }).catch(function () {
+      if ($('#hnote')) $('#hnote').textContent = 'Server belum bisa dijangkau. Periksa koneksi internet atau URL server di menu Pengaturan.';
+    });
   }
 
   /* ================= LOBI + LOGIN ================= */
@@ -149,7 +194,10 @@ var Student = (function () {
             callback: function (resp) { onGoogle(resp.credential); }
           });
           window.google.accounts.id.renderButton($('#gbtn'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'signin_with', locale: 'id', width: 260 });
-        }).catch(function (err) { note.textContent = '⚠️ ' + err.message; });
+        }).catch(function (err) { note.textContent = '⚠️ ' + err.message; }).then(function () {
+          var saved = savedToken();
+          if (saved && !gUser && $('#gbox')) onGoogle(saved);
+        });
       }
       function onGoogle(token) {
         var p = jwtPayload(token);
@@ -163,6 +211,7 @@ var Student = (function () {
           }
         }
         gUser = { token: token, email: email, name: p.name || '' };
+        try { sessionStorage.setItem('gb_gtoken', token); } catch (e) { /* penyimpanan sesi diblokir */ }
         $('#gbox').hidden = true;
         $('#gchip').innerHTML = '<div class="gchip">' + (p.picture ? '<img src="' + esc(p.picture) + '" alt="" referrerpolicy="no-referrer">' : '✅') +
           '<span><small>Masuk sebagai</small><b>' + esc(email) + '</b></span><button type="button" class="btn small ghost" id="gswitch">Ganti</button></div>';
@@ -173,6 +222,7 @@ var Student = (function () {
         (f.cls.value ? f.name : f.cls).focus();
         $('#gswitch').onclick = function () {
           gUser = null;
+          sessionStorage.removeItem('gb_gtoken');
           if (window.google) window.google.accounts.id.disableAutoSelect();
           $('#gchip').innerHTML = '';
           $('#gbox').hidden = false;

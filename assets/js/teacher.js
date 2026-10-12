@@ -51,6 +51,26 @@ var Teacher = (function () {
     if (m && m.querySelector('.spinner')) m.innerHTML = '<div class="card center-box"><div class="big-emoji">⚠️</div><p>' + esc(err.message) + '</p><a class="btn" href="#/guru/pengaturan">Periksa pengaturan</a></div>';
   }
 
+  // Tombol "Masuk dengan Google" untuk guru. Dipakai di halaman masuk guru dan halaman awal.
+  function mountGoogleButton(el, clientId, onDone) {
+    return U.loadGis().then(function () {
+      window.google.accounts.id.initialize({
+        client_id: clientId, auto_select: false,
+        callback: function (resp) {
+          Api.call('teacherGoogle', { idToken: resp.credential }).then(function (res) {
+            Api.setAuth(res.session);
+            sessionStorage.setItem('gb_temail', res.email);
+            return Api.call('ping');
+          }).then(function (p) {
+            if (!p.teacher) throw new Error('Sesi tidak valid, coba lagi.');
+            onDone(p);
+          }).catch(function (err) { Api.setAuth(''); sessionStorage.removeItem('gb_temail'); U.toast(err.message, 'err'); });
+        }
+      });
+      window.google.accounts.id.renderButton(el, { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'signin_with', locale: 'id', width: 280 });
+    });
+  }
+
   /* ================= LOGIN GURU ================= */
   function login() {
     var local = Api.isLocal();
@@ -76,22 +96,7 @@ var Teacher = (function () {
       Api.call('ping').then(function (r) {
         if (!r.googleClientId || !$('#tgoogle')) return;
         $('#tgoogle').hidden = false;
-        return U.loadGis().then(function () {
-          window.google.accounts.id.initialize({
-            client_id: r.googleClientId, auto_select: false,
-            callback: function (resp) {
-              Api.call('teacherGoogle', { idToken: resp.credential }).then(function (res) {
-                Api.setAuth(res.session);
-                sessionStorage.setItem('gb_temail', res.email);
-                return Api.call('ping');
-              }).then(function (p) {
-                if (!p.teacher) throw new Error('Sesi tidak valid, coba lagi.');
-                enter(p);
-              }).catch(function (err) { Api.setAuth(''); sessionStorage.removeItem('gb_temail'); U.toast(err.message, 'err'); });
-            }
-          });
-          window.google.accounts.id.renderButton($('#tgbtn'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'signin_with', locale: 'id', width: 280 });
-        });
+        return mountGoogleButton($('#tgbtn'), r.googleClientId, enter);
       }).catch(function () { /* tombol Google tidak ditampilkan */ });
     }
     $('#tl').onsubmit = function (e) {
@@ -1345,5 +1350,5 @@ var Teacher = (function () {
     });
   }
 
-  return { route: route };
+  return { route: route, mountGoogleButton: mountGoogleButton };
 })();
