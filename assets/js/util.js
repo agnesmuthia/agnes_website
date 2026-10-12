@@ -26,7 +26,11 @@ var U = (function () {
       '<button class="modal-x" aria-label="Tutup">✕</button>' + html + '</div>';
     document.body.appendChild(wrap);
     function close() { wrap.remove(); document.removeEventListener('keydown', onKey); if (opts.onClose) opts.onClose(); }
-    function onKey(e) { if (e.key === 'Escape') close(); }
+    function onKey(e) {
+      if (e.key !== 'Escape') return;
+      var all = document.querySelectorAll('.modal-wrap');
+      if (all[all.length - 1] === wrap) close();
+    }
     wrap.addEventListener('click', function (e) { if (e.target === wrap || e.target.closest('.modal-x')) close(); });
     document.addEventListener('keydown', onKey);
     return { el: wrap.firstChild, close: close };

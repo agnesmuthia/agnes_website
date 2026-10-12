@@ -143,8 +143,12 @@ var Logic = (function () {
         })[0];
       }
       var violations = list.reduce(function (s, r) { return s + (Number(r.violations) || 0); }, 0);
+      var flags = [];
+      list.forEach(function (r) {
+        String(r.flags || '').split('; ').forEach(function (f) { if (f && flags.indexOf(f) < 0) flags.push(f); });
+      });
       return {
-        key: k, name: latest.name, cls: latest.cls, sid: latest.sid,
+        key: k, name: latest.name, cls: latest.cls, sid: latest.sid, email: latest.email || '', flags: flags.join('; '),
         score: done.length ? Number(pick.score) : 0,
         correct: Number(pick.correct) || 0, total: Number(pick.total) || 0,
         durationSec: Number(pick.durationSec) || 0, xp: Number(pick.xp) || 0,

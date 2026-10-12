@@ -4,7 +4,10 @@
  * backend/Code.gs untuk Google Sheets, dengan objek `db` yang berbeda.
  */
 var Core = (function () {
-  var TEACHER_ACTIONS = ['listGames', 'saveGame', 'deleteGame', 'results', 'resetAttempts', 'exportDrive'];
+  var VERSION = 2; // naikkan setiap kali backend (Code.gs) berubah
+  var TEACHER_ACTIONS = ['listGames', 'saveGame', 'deleteGame', 'results', 'resetAttempts', 'exportDrive',
+    'getConfig', 'saveConfig', 'driveFolders', 'driveCreateFolder', 'driveHistory', 'runAutoSave'];
+  var NO_DRIVE = 'Fitur Google Drive hanya tersedia jika aplikasi terhubung ke Google Sheets (menu Pengaturan).';
   var CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
   function nowIso() { return new Date().toISOString(); }
@@ -57,8 +60,11 @@ var Core = (function () {
     return n > 0 && n < all ? n : all;
   }
 
-  function publicGame(g) {
+  function config(db) { return db.getConfig ? db.getConfig() : {}; }
+
+  function publicGame(g, cfg) {
     var s = g.settings || {};
+    var google = s.loginMode === 'google';
     return {
       code: g.code, title: g.title, subject: g.subject, cls: g.cls || '', description: g.description || '',
       theme: g.theme || 'galaxy', questionCount: questionTotal(g),
@@ -66,12 +72,14 @@ var Core = (function () {
         timePerQuestion: Number(s.timePerQuestion) || 0, maxAttempts: Number(s.maxAttempts) || 0,
         showFeedback: !!s.showFeedback, showLeaderboard: !!s.showLeaderboard, powerUps: !!s.powerUps,
         antiCheat: Number(s.antiCheat) || 0, kkm: Number(s.kkm) || 75, scorePolicy: s.scorePolicy || 'best',
-        openAt: s.openAt || '', closeAt: s.closeAt || '', active: s.active !== false
+        openAt: s.openAt || '', closeAt: s.closeAt || '', active: s.active !== false,
+        loginMode: google ? 'google' : 'form', allowedDomain: google ? (s.allowedDomain || '') : '',
+        googleClientId: google && cfg ? (cfg.googleClientId || '') : ''
       }
     };
   }
 
-  function cleanStudent(st) {
+  function cleanStudent(st, sidOptional) {
     st = st || {};
     var out = {
       name: String(st.name || '').trim().slice(0, 80),
@@ -80,7 +88,7 @@ var Core = (function () {
     };
     if (out.name.length < 3) fail('Tuliskan nama lengkapmu.');
     if (!out.cls) fail('Tuliskan kelasmu.');
-    if (!out.sid) fail('Tuliskan NIS atau nomor absen.');
+    if (!out.sid && !sidOptional) fail('Tuliskan NIS atau nomor absen.');
     return out;
   }
 
@@ -114,12 +122,54 @@ var Core = (function () {
     return g;
   }
 
+  function domainOk(email, domain) {
+    domain = String(domain || '').trim().toLowerCase().replace(/^@/, '');
+    if (!domain) return true;
+    var host = email.split('@')[1] || '';
+    return host === domain || host.slice(-(domain.length + 1)) === '.' + domain;
+  }
+
+  // Penanda (bukan penolakan) agar jawaban siswa tidak hilang, tetapi guru tahu.
+  function lateFlags(r, s) {
+    var flags = [];
+    var fin = Date.parse(r.finishedAt);
+    if (s.closeAt && fin > Date.parse(s.closeAt) + 120000) flags.push('Dikirim setelah game ditutup');
+    var tpq = Number(s.timePerQuestion) || 0;
+    if (tpq > 0) {
+      var limit = Number(r.total) * (tpq + 4) + (s.powerUps ? 15 : 0) + 120;
+      if (Number(r.durationSec) > limit) flags.push('Melebihi batas waktu pengerjaan');
+    }
+    return flags.join('; ');
+  }
+
+  function cleanConfig(c) {
+    var out = {};
+    c = c || {};
+    if ('googleClientId' in c) {
+      var cid = String(c.googleClientId || '').trim();
+      if (cid && !/^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(cid)) {
+        fail('Client ID tidak valid. Bentuknya seperti 1234567890-abc123.apps.googleusercontent.com');
+      }
+      out.googleClientId = cid;
+    }
+    if ('schoolYear' in c) {
+      var y = String(c.schoolYear || '').trim().replace('/', '-');
+      if (y && !/^\d{4}-\d{4}$/.test(y)) fail('Tahun ajaran harus berbentuk 2026-2027.');
+      out.schoolYear = y;
+    }
+    if ('driveRootId' in c) out.driveRootId = String(c.driveRootId || '').trim();
+    if ('autoSave' in c) out.autoSave = !!c.autoSave;
+    if ('autoSaveMode' in c) out.autoSaveMode = c.autoSaveMode === 'combined' ? 'combined' : 'perClass';
+    return out;
+  }
+
   function stripRow(r) {
     return {
       id: r.id, code: r.code, key: r.key, name: r.name, cls: r.cls, sid: r.sid, attempt: Number(r.attempt) || 1,
       status: r.status, score: r.status === 'done' ? Number(r.score) : null, correct: Number(r.correct) || 0,
       total: Number(r.total) || 0, durationSec: Number(r.durationSec) || 0, violations: Number(r.violations) || 0,
-      xp: Number(r.xp) || 0, startedAt: r.startedAt, finishedAt: r.finishedAt || '', detail: r.detail || {}
+      xp: Number(r.xp) || 0, startedAt: r.startedAt, finishedAt: r.finishedAt || '', detail: r.detail || {},
+      email: r.email || '', flags: r.flags || ''
     };
   }
 
@@ -132,19 +182,33 @@ var Core = (function () {
 
     switch (action) {
       case 'ping':
-        return { mode: db.mode, teacher: isTeacher, configured: !!tkey };
+        return { mode: db.mode, teacher: isTeacher, configured: !!tkey, version: VERSION, googleLogin: !!config(db).googleClientId };
 
       case 'getGame': {
         var g = needGame(db, req.code);
-        return { game: publicGame(g), closed: accessError(g) };
+        return { game: publicGame(g, config(db)), closed: accessError(g) };
       }
 
       case 'start': {
         var g1 = needGame(db, req.code);
         var err = accessError(g1);
         if (err) fail(err);
-        var st = cleanStudent(req.student);
-        var key = Logic.studentKey(st);
+        var s1 = g1.settings || {};
+        var st, key, email = '';
+        if (s1.loginMode === 'google') {
+          if (!db.verifyGoogleToken) fail('Login Google hanya tersedia jika aplikasi terhubung ke Google Sheets.');
+          var ident = db.verifyGoogleToken(String(req.idToken || ''));
+          if (!domainOk(ident.email, s1.allowedDomain)) {
+            fail('Gunakan akun Google dengan domain @' + String(s1.allowedDomain).replace(/^@/, '') + '.');
+          }
+          var raw = req.student || {};
+          st = cleanStudent({ name: raw.name || ident.name, cls: raw.cls, sid: raw.sid }, true);
+          email = ident.email;
+          key = 'g|' + email;
+        } else {
+          st = cleanStudent(req.student);
+          key = Logic.studentKey(st);
+        }
         var mine = db.results({ code: g1.code }).filter(function (r) { return r.key === key; });
         var max = Number((g1.settings || {}).maxAttempts) || 0;
         if (max > 0 && mine.length >= max) {
@@ -155,12 +219,13 @@ var Core = (function () {
           id: uid(), code: g1.code, key: key, name: st.name, cls: st.cls, sid: st.sid,
           attempt: mine.length + 1, status: 'started', score: '', correct: '', total: at.key.length,
           durationSec: '', violations: 0, xp: 0, startedAt: nowIso(), finishedAt: '',
-          servedKey: at.key, answers: [], detail: {}
+          servedKey: at.key, answers: [], detail: {}, email: email, flags: ''
         };
         db.appendResult(row);
+        st.email = email;
         return {
           attemptId: row.id, served: at.served, attemptNo: row.attempt, maxAttempts: max,
-          startedAt: row.startedAt, game: publicGame(g1), student: st
+          startedAt: row.startedAt, game: publicGame(g1, config(db)), student: st
         };
       }
 
@@ -181,6 +246,7 @@ var Core = (function () {
           r.xp = Math.max(0, Math.min(999999, Number(req.xp) || 0));
           r.finishedAt = nowIso();
           r.durationSec = Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt)) / 1000);
+          r.flags = lateFlags(r, g2.settings || {});
           db.updateResult(r);
         }
         var s2 = g2.settings || {};
@@ -200,11 +266,15 @@ var Core = (function () {
         var g3 = needGame(db, req.code);
         var s3 = g3.settings || {};
         if (!s3.showLeaderboard && !isTeacher) fail('Papan skor game ini disembunyikan oleh guru.');
-        var list = Logic.rank(Logic.counted(db.results({ code: g3.code }), s3.scorePolicy).filter(function (x) { return x.finished; }));
+        var all3 = db.results({ code: g3.code });
+        // "me" = id percobaan milik siswa ini (acak, tidak bisa ditebak). NIS/email tidak pernah dikirim.
+        var meKey = null;
+        all3.forEach(function (r) { if (req.me && r.id === String(req.me)) meKey = r.key; });
+        var list = Logic.rank(Logic.counted(all3, s3.scorePolicy).filter(function (x) { return x.finished; }));
         return {
           game: publicGame(g3),
           list: list.map(function (x) {
-            return { key: x.key, name: x.name, cls: x.cls, score: x.score, durationSec: x.durationSec, xp: x.xp, attempts: x.attempts };
+            return { name: x.name, cls: x.cls, score: x.score, durationSec: x.durationSec, xp: x.xp, attempts: x.attempts, me: x.key === meKey };
           })
         };
       }
@@ -258,14 +328,44 @@ var Core = (function () {
       }
 
       case 'exportDrive': {
-        if (!db.exportDrive) fail('Simpan ke Google Drive hanya tersedia jika aplikasi terhubung ke Google Sheets (menu Pengaturan).');
+        if (!db.exportDrive) fail(NO_DRIVE);
         var g4 = needGame(db, req.code);
         var rows = db.results({ code: g4.code });
-        return { url: db.exportDrive(g4, rows) };
+        if (!rows.length) fail('Belum ada siswa yang mengerjakan game ini.');
+        var files = db.exportDrive(g4, rows, { mode: req.mode, folderId: req.folderId || '' });
+        return { files: files, url: files.length ? files[0].url : '' };
       }
+
+      case 'getConfig':
+        return { config: config(db), drive: db.driveInfo ? db.driveInfo() : null };
+
+      case 'saveConfig': {
+        if (!db.setConfig) fail(NO_DRIVE);
+        db.setConfig(cleanConfig(req.config));
+        return { config: config(db), drive: db.driveInfo ? db.driveInfo() : null };
+      }
+
+      case 'driveFolders':
+        if (!db.driveFolders) fail(NO_DRIVE);
+        return db.driveFolders(String(req.parentId || ''), !!req.fromMyDrive);
+
+      case 'driveCreateFolder': {
+        if (!db.driveCreateFolder) fail(NO_DRIVE);
+        var fname = String(req.name || '').trim();
+        if (!fname) fail('Nama folder wajib diisi.');
+        return { folder: db.driveCreateFolder(String(req.parentId || ''), fname) };
+      }
+
+      case 'driveHistory':
+        if (!db.driveHistory) return { files: [] };
+        return { files: db.driveHistory(req.code ? String(req.code).toUpperCase() : '') };
+
+      case 'runAutoSave':
+        if (!db.autoSave) fail(NO_DRIVE);
+        return db.autoSave();
     }
     fail('Aksi tidak dikenal: ' + action);
   }
 
-  return { handle: handle, publicGame: publicGame, accessError: accessError };
+  return { handle: handle, publicGame: publicGame, accessError: accessError, VERSION: VERSION };
 })();

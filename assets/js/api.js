@@ -53,7 +53,10 @@ var Api = (function () {
   }
 
   function auth() { return sessionStorage.getItem('gb_auth') || ''; }
-  function setAuth(a) { if (a) sessionStorage.setItem('gb_auth', a); else sessionStorage.removeItem('gb_auth'); }
+  function setAuth(a) {
+    if (a) sessionStorage.setItem('gb_auth', a);
+    else { sessionStorage.removeItem('gb_auth'); sessionStorage.removeItem('gb_bver'); sessionStorage.removeItem('gb_glogin'); }
+  }
 
   function call(action, payload, endpoint) {
     var req = Object.assign({ action: action, auth: auth() }, payload || {});
@@ -82,5 +85,18 @@ var Api = (function () {
     return base + q + '#/' + (board ? 'skor' : 'main') + '/' + code;
   }
 
-  return { call: call, url: url, setUrl: setUrl, auth: auth, setAuth: setAuth, shareLink: shareLink, isLocal: function () { return !url(); } };
+  // Versi backend (Code.gs) yang dibutuhkan aplikasi ini. Sama dengan Core.VERSION.
+  var REQUIRED_BACKEND = 2;
+  function backendVersion() { return Number(sessionStorage.getItem('gb_bver')) || 0; }
+  function setBackendInfo(r) {
+    sessionStorage.setItem('gb_bver', String(r.version || 1));
+    sessionStorage.setItem('gb_glogin', r.googleLogin ? '1' : '');
+  }
+  function backendOutdated() { var v = backendVersion(); return !!url() && v > 0 && v < REQUIRED_BACKEND; }
+
+  return {
+    call: call, url: url, setUrl: setUrl, auth: auth, setAuth: setAuth, shareLink: shareLink, isLocal: function () { return !url(); },
+    REQUIRED_BACKEND: REQUIRED_BACKEND, backendVersion: backendVersion, setBackendInfo: setBackendInfo, backendOutdated: backendOutdated,
+    googleLoginReady: function () { return sessionStorage.getItem('gb_glogin') === '1'; }
+  };
 })();

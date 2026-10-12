@@ -33,6 +33,31 @@ var Student = (function () {
   }
 
   function progKey(code) { return 'gb_prog_' + code; }
+
+  /* ---------- Login Google (Google Identity Services) ---------- */
+  var gisPromise = null;
+  function loadGis() {
+    if (window.google && window.google.accounts && window.google.accounts.id) return Promise.resolve();
+    if (!gisPromise) {
+      gisPromise = new Promise(function (resolve, reject) {
+        var sc = document.createElement('script');
+        sc.src = 'https://accounts.google.com/gsi/client';
+        sc.async = true;
+        sc.onload = resolve;
+        sc.onerror = function () { gisPromise = null; reject(new Error('Gagal memuat login Google. Periksa koneksi internet.')); };
+        document.head.appendChild(sc);
+      });
+    }
+    return gisPromise;
+  }
+
+  // Hanya untuk tampilan (nama & email). Keabsahan token diperiksa di server.
+  function jwtPayload(token) {
+    try {
+      var b = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      return JSON.parse(decodeURIComponent(escape(atob(b))));
+    } catch (e) { return {}; }
+  }
   function loadProgress(code) { try { return JSON.parse(localStorage.getItem(progKey(code))); } catch (e) { return null; } }
   function persist() { if (S) localStorage.setItem(progKey(S.code), JSON.stringify(S)); }
 
@@ -91,6 +116,8 @@ var Student = (function () {
     Api.call('getGame', { code: code }).then(function (res) {
       var g = res.game, s = g.settings;
       var st = savedStudent();
+      var useGoogle = s.loginMode === 'google';
+      var gUser = null;
       var prog = loadProgress(code);
       var info = [
         ['📚', g.subject || 'Umum'], ['❓', g.questionCount + ' soal'],
@@ -116,27 +143,80 @@ var Student = (function () {
         '</ul></div>' +
         '<form class="card glass lobby-form" id="login">' +
         (res.closed ? '<div class="notice err">🔒 ' + esc(res.closed) + '</div>' : resume) +
-        '<h2>Siapa kamu? 👋</h2>' +
+        (useGoogle ? '<h2>Masuk dulu, ya! 👋</h2>' +
+          '<div class="gbox" id="gbox"><div id="gbtn"></div><p class="small muted" id="gnote">Masuk dengan akun Google' +
+          (s.allowedDomain ? ' <b>@' + esc(s.allowedDomain.replace(/^@/, '')) + '</b>' : '') + ' untuk mulai bermain.</p></div>' +
+          '<div id="gchip"></div>'
+          : '<h2>Siapa kamu? 👋</h2>') +
+        '<div id="sfields"' + (useGoogle ? ' hidden' : '') + '>' +
         '<label>Nama lengkap<input name="name" required minlength="3" maxlength="80" value="' + esc(st.name || '') + '" placeholder="cth. Budi Santoso"></label>' +
         '<div class="row gap"><label class="grow">Kelas<input name="cls" required maxlength="30" value="' + esc(st.cls || '') + '" placeholder="cth. XI IPA 2"></label>' +
-        '<label class="grow">NIS / No. Absen<input name="sid" required maxlength="30" value="' + esc(st.sid || '') + '" placeholder="cth. 12"></label></div>' +
-        '<button class="btn big glow full" type="submit" ' + (res.closed ? 'disabled' : '') + '>🚀 Mulai Main!</button>' +
+        '<label class="grow">NIS / No. Absen' + (useGoogle ? ' (opsional)' : '') + '<input name="sid" ' + (useGoogle ? '' : 'required ') +
+        'maxlength="30" value="' + esc(st.sid || '') + '" placeholder="cth. 12"></label></div></div>' +
+        '<button class="btn big glow full" type="submit" ' + (res.closed || useGoogle ? 'disabled' : '') + '>🚀 Mulai Main!</button>' +
         (s.showLeaderboard ? '<a class="btn ghost full" href="#/skor/' + esc(g.code) + '">🏆 Lihat Papan Skor</a>' : '') +
         '</form></div>');
       bindMute(root());
       var r = $('#resume');
       if (r) r.onclick = function () { S = prog; U.sfx.go(); countdown(); };
+
+      if (useGoogle && !res.closed) setupGoogle();
+      function setupGoogle() {
+        var note = $('#gnote');
+        if (!s.googleClientId) { note.textContent = '⚠️ Login Google belum diatur oleh guru. Hubungi gurumu.'; return; }
+        loadGis().then(function () {
+          window.google.accounts.id.initialize({
+            client_id: s.googleClientId, auto_select: false, cancel_on_tap_outside: true,
+            callback: function (resp) { onGoogle(resp.credential); }
+          });
+          window.google.accounts.id.renderButton($('#gbtn'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'signin_with', locale: 'id', width: 260 });
+        }).catch(function (err) { note.textContent = '⚠️ ' + err.message; });
+      }
+      function onGoogle(token) {
+        var p = jwtPayload(token);
+        var email = String(p.email || '').toLowerCase();
+        var dom = String(s.allowedDomain || '').replace(/^@/, '').toLowerCase();
+        if (dom) {
+          var host = email.split('@')[1] || '';
+          if (host !== dom && host.slice(-(dom.length + 1)) !== '.' + dom) {
+            U.toast('Gunakan akun Google dengan domain @' + dom + '.', 'err');
+            return;
+          }
+        }
+        gUser = { token: token, email: email, name: p.name || '' };
+        $('#gbox').hidden = true;
+        $('#gchip').innerHTML = '<div class="gchip">' + (p.picture ? '<img src="' + esc(p.picture) + '" alt="" referrerpolicy="no-referrer">' : '✅') +
+          '<span><small>Masuk sebagai</small><b>' + esc(email) + '</b></span><button type="button" class="btn small ghost" id="gswitch">Ganti</button></div>';
+        $('#sfields').hidden = false;
+        var f = $('#login');
+        if (!f.name.value.trim()) f.name.value = gUser.name;
+        f.querySelector('button[type=submit]').disabled = false;
+        (f.cls.value ? f.name : f.cls).focus();
+        $('#gswitch').onclick = function () {
+          gUser = null;
+          if (window.google) window.google.accounts.id.disableAutoSelect();
+          $('#gchip').innerHTML = '';
+          $('#gbox').hidden = false;
+          $('#sfields').hidden = true;
+          f.querySelector('button[type=submit]').disabled = true;
+        };
+      }
       $('#login').onsubmit = function (e) {
         e.preventDefault();
         var f = e.target;
         var student = { name: f.name.value.trim(), cls: f.cls.value.trim().toUpperCase(), sid: f.sid.value.trim() };
+        if (useGoogle && !gUser) { U.toast('Masuk dengan akun Google terlebih dahulu.', 'err'); return; }
         localStorage.setItem('gb_student', JSON.stringify(Object.assign({}, student, { lastCode: g.code })));
-        if (prog && prog.attemptId && !prog.submitted && Logic.studentKey(prog.student) === Logic.studentKey(student)) {
-          S = prog; countdown(); return;
-        }
+        var same = prog && prog.attemptId && !prog.submitted && (useGoogle
+          ? prog.student.email === gUser.email
+          : Logic.studentKey(prog.student) === Logic.studentKey(student));
+        if (same) { S = prog; countdown(); return; }
         var btn = f.querySelector('button[type=submit]');
         btn.disabled = true; btn.textContent = 'Menyiapkan soal…';
-        Api.call('start', { code: g.code, student: student }).then(function (at) {
+        var req = { code: g.code, student: student };
+        if (useGoogle) req.idToken = gUser.token;
+        Api.call('start', req).then(function (at) {
+          localStorage.setItem('gb_me_' + g.code, at.attemptId);
           S = {
             code: g.code, attemptId: at.attemptId, served: at.served, game: at.game, student: at.student,
             attemptNo: at.attemptNo, maxAttempts: at.maxAttempts, idx: 0, answers: [], xp: 0, combo: 0, maxCombo: 0,
@@ -563,11 +643,10 @@ var Student = (function () {
     code = String(code || '').toUpperCase();
     var state = { page: 0, q: '', cls: '', list: [], game: null, auto: true };
     var PER = 50;
-    var me = Logic.studentKey(savedStudent());
     loading('sport', 'Memuat papan skor…');
 
     function fetchData(first) {
-      return Api.call('leaderboard', { code: code }).then(function (res) {
+      return Api.call('leaderboard', { code: code, me: localStorage.getItem('gb_me_' + code) || '' }).then(function (res) {
         state.list = res.list.map(function (x, i) { x.rank = i + 1; return x; });
         state.game = res.game;
         if (first) layout(); else draw();
@@ -609,7 +688,7 @@ var Student = (function () {
       $('#podium').innerHTML = top.length ? '<div class="podium">' + order.map(function (x, i) {
         if (!x) return '<div class="pod empty"></div>';
         var place = [2, 1, 3][i];
-        return '<div class="pod p' + place + (x.key === me ? ' me' : '') + '"><div class="pod-medal">' + ['🥇', '🥈', '🥉'][place - 1] + '</div>' +
+        return '<div class="pod p' + place + (x.me ? ' me' : '') + '"><div class="pod-medal">' + ['🥇', '🥈', '🥉'][place - 1] + '</div>' +
           '<div class="pod-name">' + esc(x.name) + '</div><div class="pod-cls">' + esc(x.cls) + '</div>' +
           '<div class="pod-score">' + x.score + '</div><div class="pod-bar"><span>' + place + '</span></div></div>';
       }).join('') + '</div>' : '<div class="card glass center-box"><div class="big-emoji">🕹️</div><p>Belum ada yang menyelesaikan game ini. Jadilah yang pertama!</p></div>';
@@ -623,9 +702,9 @@ var Student = (function () {
       $('#bcount').textContent = rows.length + ' peserta';
       $('#blist').innerHTML = '<div class="lb-row lb-head"><span>#</span><span>Nama</span><span>Kelas</span><span>Waktu</span><span>Nilai</span></div>' +
         slice.map(function (x) {
-          return '<div class="lb-row' + (x.key === me ? ' me' : '') + (x.rank <= 3 ? ' top' : '') + '">' +
+          return '<div class="lb-row' + (x.me ? ' me' : '') + (x.rank <= 3 ? ' top' : '') + '">' +
             '<span class="lb-rank">' + (x.rank <= 3 ? ['🥇', '🥈', '🥉'][x.rank - 1] : x.rank) + '</span>' +
-            '<span class="lb-name">' + esc(x.name) + (x.key === me ? ' <em>(kamu)</em>' : '') + '</span>' +
+            '<span class="lb-name">' + esc(x.name) + (x.me ? ' <em>(kamu)</em>' : '') + '</span>' +
             '<span>' + esc(x.cls) + '</span><span>' + U.fmtTime(x.durationSec) + '</span>' +
             '<span class="lb-score">' + x.score + '</span></div>';
         }).join('') + (rows.length ? '' : '<p class="muted center">Tidak ada yang cocok.</p>');

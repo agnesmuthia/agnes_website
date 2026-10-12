@@ -23,6 +23,9 @@ var Teacher = (function () {
       '<main class="main" id="main">' +
       (Api.isLocal() && active !== 'pengaturan' ? '<div class="notice warn">💻 <span><b>Mode Lokal:</b> data hanya tersimpan di browser ini, sehingga siswa belum bisa bermain dari perangkat lain. ' +
         '<a href="#/guru/pengaturan">Hubungkan ke Google Sheets</a> agar bisa dibagikan dan rekap tersimpan di Google Drive.</span></div>' : '') +
+      (Api.backendOutdated() ? '<div class="notice warn">⚙️ <span><b>Backend perlu diperbarui:</b> Code.gs di Google Apps Script masih versi ' +
+        Api.backendVersion() + ', aplikasi membutuhkan versi ' + Api.REQUIRED_BACKEND + '. Fitur folder Drive, login Google siswa, dan simpan otomatis belum aktif. ' +
+        '<a href="#/guru/pengaturan">Lihat cara memperbarui</a>.</span></div>' : '') +
       content + '</main></div>';
     $('#logout').onclick = function () { Api.setAuth(''); cache.games = null; location.hash = '#/'; };
   }
@@ -70,6 +73,7 @@ var Teacher = (function () {
       Api.call('ping').then(function (r) {
         if (r.configured === false) throw new Error('TEACHER_KEY belum diatur di Script Properties Google Apps Script.');
         if (!r.teacher) throw new Error(local ? 'PIN salah.' : 'Kata sandi guru salah.');
+        Api.setBackendInfo(r);
         U.toast('Selamat datang! 👋', 'ok');
         route(location.hash.replace(/^#\/guru\/?/, ''));
       }).catch(function (err) { Api.setAuth(''); U.toast(err.message, 'err'); });
@@ -88,6 +92,10 @@ var Teacher = (function () {
   function route(path) {
     Student.cleanup();
     if (!Api.auth()) { login(); return; }
+    if (!Api.isLocal() && !Api.backendVersion()) {
+      Api.call('ping').then(function (r) { Api.setBackendInfo(r); route(path); }).catch(function () { Api.setBackendInfo({ version: 1 }); route(path); });
+      return;
+    }
     var p = path.split('/');
     switch (p[0]) {
       case '': return dashboard();
@@ -405,6 +413,13 @@ var Teacher = (function () {
       '<label>Dibuka mulai<input type="datetime-local" data-s="openAt" value="' + U.toLocalInput(s.openAt) + '"></label>' +
       '<label>Ditutup pada<input type="datetime-local" data-s="closeAt" value="' + U.toLocalInput(s.closeAt) + '"></label>' +
       '<label>Batas keluar halaman (anti-curang)<input type="number" min="0" max="20" data-s="antiCheat" value="' + s.antiCheat + '"><small>Jawaban otomatis dikumpulkan jika siswa pindah tab/aplikasi sebanyak ini. 0 = hanya dicatat.</small></label>' +
+      '<label>Cara login siswa<select data-s="loginMode">' +
+      [['form', '📝 Formulir (nama, kelas, NIS)'], ['google', '🔐 Akun Google (Gmail)']].map(function (o) {
+        return '<option value="' + o[0] + '" ' + ((s.loginMode || 'form') === o[0] ? 'selected' : '') + '>' + o[1] + '</option>';
+      }).join('') + '</select><small>' + loginHelp() + '</small></label>' +
+      '<label id="domWrap" ' + (s.loginMode === 'google' ? '' : 'hidden') + '>Batasi domain email (opsional)' +
+      '<input data-s="allowedDomain" maxlength="60" value="' + esc(s.allowedDomain || '') + '" placeholder="kosongkan = semua akun Google">' +
+      '<small>Contoh: <code>sma.belajar.id</code>. Kosongkan agar semua akun Gmail bisa masuk.</small></label>' +
       toggle('active', 'Game aktif (bisa dimainkan)') +
       toggle('shuffleQuestions', 'Acak urutan soal') +
       toggle('shuffleOptions', 'Acak pilihan jawaban') +
@@ -427,6 +442,13 @@ var Teacher = (function () {
         ['A', 'B', 'C', 'D'].map(function (x, i) { return '<button class="opt c' + i + '"><span class="shape">' + ['▲', '◆', '●', '■'][i] + '</span><span class="ot">Pilihan ' + x + '</span></button>'; }).join('') +
         '</div></div></div>') + '</div>', { wide: true });
     };
+  }
+
+  function loginHelp() {
+    if (Api.isLocal()) return '⚠️ Login Google hanya berfungsi jika aplikasi terhubung ke Google Sheets.';
+    if (Api.backendOutdated()) return '⚠️ Perbarui Code.gs dulu agar login Google bisa dipakai.';
+    if (!Api.googleLoginReady()) return '⚠️ Isi Client ID Google di menu <a href="#/guru/pengaturan">Pengaturan</a> agar login Google aktif.';
+    return 'Akun Google membuat identitas siswa terverifikasi; kesempatan dihitung per email. Tentukan sebelum siswa mulai bermain.';
   }
 
   function toggle(key, label, help) {
@@ -488,6 +510,7 @@ var Teacher = (function () {
     }
     var sk = t.getAttribute('data-s');
     if (sk) {
+      if (sk === 'loginMode') $('#domWrap').hidden = t.value !== 'google';
       if (t.type === 'checkbox') D.settings[sk] = t.checked;
       else if (t.type === 'number') D.settings[sk] = Math.max(0, Number(t.value) || 0);
       else if (t.type === 'datetime-local') D.settings[sk] = t.value ? new Date(t.value).toISOString() : '';
@@ -677,7 +700,7 @@ var Teacher = (function () {
     shell('rekap', '<div class="page-head"><div><h1>📋 Rekap Nilai</h1><p class="muted">Nilai yang dipakai: <b>' + policy + '</b> · KKM ' + kkm + '</p></div>' +
       '<div class="row gap wrap">' + gamePicker(gs, g.code) + '</div></div>' +
       '<div class="toolbar card">' +
-      '<input id="rq" placeholder="🔍 Cari nama / NIS…"><select id="rc"><option value="">Semua kelas</option>' +
+      '<input id="rq" placeholder="🔍 Cari nama / NIS / email…"><select id="rc"><option value="">Semua kelas</option>' +
       Object.keys(classes).sort().map(function (c) { return '<option>' + esc(c) + '</option>'; }).join('') + '</select>' +
       '<select id="rs"><option value="rank">Urut: peringkat</option><option value="name">Urut: nama</option><option value="cls">Urut: kelas</option><option value="low">Urut: nilai terendah</option></select>' +
       '<span class="grow"></span>' +
@@ -686,12 +709,14 @@ var Teacher = (function () {
       '<div class="print-title"><h2>Rekap Nilai: ' + esc(g.title) + '</h2><p>' + esc(g.subject || '') + ' · Kode ' + esc(g.code) + ' · Dicetak ' + U.fmtDate(new Date().toISOString()) + '</p></div>' +
       '<div class="card table-card"><div class="table-wrap"><table class="tbl"><thead><tr><th>#</th><th>Nama</th><th>Kelas</th><th>NIS/Absen</th><th>Nilai</th><th>Keterangan</th>' +
       '<th>Benar</th><th>Percobaan</th><th>Durasi</th><th title="Jumlah keluar dari halaman game">⚠️</th><th>Terakhir</th><th class="no-print">Aksi</th></tr></thead><tbody id="rt"></tbody></table></div>' +
-      '<p class="muted small" id="rsum"></p></div>');
+      '<p class="muted small" id="rsum"></p></div>' +
+      (Api.isLocal() ? '' : '<section class="card no-print" id="dhist"><h3>☁️ File rekap di Google Drive</h3><p class="muted small">Memuat…</p></section>'));
     bindPicker('rekap');
+    loadHistory(g);
 
     function visible() {
       var list = people.filter(function (p) {
-        var t = (p.name + ' ' + p.sid).toLowerCase();
+        var t = (p.name + ' ' + p.sid + ' ' + p.email).toLowerCase();
         return (!f.cls || p.cls === f.cls) && (!f.q || t.indexOf(f.q) >= 0);
       });
       if (f.sort === 'name') list.sort(function (a, b) { return a.name.localeCompare(b.name); });
@@ -705,7 +730,9 @@ var Teacher = (function () {
       var list = visible();
       $('#rt').innerHTML = list.map(function (p, i) {
         var l = label(p);
-        return '<tr><td>' + (i + 1) + '</td><td><b>' + esc(p.name) + '</b></td><td>' + esc(p.cls) + '</td><td>' + esc(p.sid) + '</td>' +
+        return '<tr><td>' + (i + 1) + '</td><td><b>' + esc(p.name) + '</b>' + (p.email ? '<br><small class="muted">' + esc(p.email) + '</small>' : '') +
+          (p.flags ? '<br><span class="badge warn" title="Jawaban tetap diterima, tetapi perlu dicek">⏰ ' + esc(p.flags) + '</span>' : '') +
+          '</td><td>' + esc(p.cls) + '</td><td>' + esc(p.sid) + '</td>' +
           '<td><span class="score-pill ' + (!p.finished ? 'na' : p.score >= kkm ? 'ok' : 'bad') + '">' + (p.finished ? p.score : '-') + '</span></td>' +
           '<td>' + l + '</td><td>' + p.correct + '/' + p.total + '</td><td>' + p.attempts + (s.maxAttempts ? '/' + s.maxAttempts : '') + '</td>' +
           '<td>' + U.fmtTime(p.durationSec) + '</td><td class="' + (p.violations ? 'txt-bad' : '') + '">' + p.violations + '</td>' +
@@ -735,9 +762,9 @@ var Teacher = (function () {
     };
 
     function table() {
-      var head = ['No', 'Nama', 'Kelas', 'NIS/Absen', 'Nilai', 'Keterangan', 'Benar', 'Jumlah Soal', 'Percobaan', 'Durasi (detik)', 'Pelanggaran', 'Waktu Selesai'];
+      var head = ['No', 'Nama', 'Kelas', 'NIS/Absen', 'Email', 'Nilai', 'Keterangan', 'Benar', 'Jumlah Soal', 'Percobaan', 'Durasi (detik)', 'Pelanggaran', 'Waktu Selesai', 'Catatan'];
       return [head].concat(visible().map(function (p, i) {
-        return [i + 1, p.name, p.cls, p.sid, p.finished ? p.score : '', label(p), p.correct, p.total, p.attempts, p.durationSec, p.violations, U.fmtDate(p.finishedAt)];
+        return [i + 1, p.name, p.cls, p.sid, p.email, p.finished ? p.score : '', label(p), p.correct, p.total, p.attempts, p.durationSec, p.violations, U.fmtDate(p.finishedAt), p.flags];
       }));
     }
     var fname = 'rekap-' + slug(g.title) + '-' + g.code;
@@ -750,25 +777,151 @@ var Teacher = (function () {
           '<p class="muted small">Alternatif: unduh CSV/Excel lalu unggah manual ke Google Drive.</p>');
         return;
       }
-      var b = $('#xdrive');
-      b.disabled = true; b.textContent = 'Menyimpan ke Drive…';
-      Api.call('exportDrive', { code: g.code }).then(function (r) {
-        b.disabled = false; b.textContent = '☁️ Simpan ke Google Drive';
-        U.modal('<div class="center-box"><div class="big-emoji">✅</div><h3>Tersimpan di Google Drive!</h3><p>File rekap beserta diagram dan analisis soal tersimpan di folder <b>Rekap Game Belajar</b>.</p>' +
-          '<a class="btn glow" href="' + esc(r.url) + '" target="_blank" rel="noopener">Buka file di Google Sheets ↗</a></div>');
-      }).catch(function (err) { b.disabled = false; b.textContent = '☁️ Simpan ke Google Drive'; fail(err); });
+      if (Api.backendOutdated()) {
+        U.modal('<h3>☁️ Simpan ke Google Drive</h3><p>Pilihan folder dan file per kelas membutuhkan Code.gs versi ' + Api.REQUIRED_BACKEND +
+          '. Perbarui dulu Code.gs di Google Apps Script (lihat <a href="#/guru/pengaturan">Pengaturan</a>).</p>');
+        return;
+      }
+      exportDialog(g);
     };
     draw();
+  }
+
+  /* ================= GOOGLE DRIVE ================= */
+  function loadHistory(g) {
+    var box = $('#dhist');
+    if (!box || Api.backendOutdated()) { if (box) box.remove(); return; }
+    Api.call('driveHistory', { code: g.code }).then(function (r) {
+      if (!$('#dhist')) return;
+      box.innerHTML = '<h3>☁️ File rekap di Google Drive</h3>' + (r.files.length ? '<ul class="file-list">' + r.files.map(fileItem).join('') + '</ul>' +
+        '<p class="muted small">Menekan "Simpan ke Google Drive" lagi akan memperbarui file-file ini, bukan membuat salinan baru.</p>'
+        : '<p class="muted">Belum ada file. Klik <b>☁️ Simpan ke Google Drive</b> di atas.</p>');
+    }).catch(function () { box.remove(); });
+  }
+
+  function fileItem(f) {
+    return '<li><span class="fi-icon">📊</span><span class="fi-main"><a href="' + esc(f.url) + '" target="_blank" rel="noopener">' + esc(f.name) + '</a>' +
+      '<small class="muted">📁 ' + esc(f.path) + (f.updatedAt ? ' · ' + U.fmtDate(f.updatedAt) : '') + '</small></span>' +
+      (f.updated === true ? '<span class="badge">Diperbarui</span>' : f.updated === false ? '<span class="badge ok">Baru</span>' : '') + '</li>';
+  }
+
+  function exportDialog(g) {
+    var st = { mode: 'perClass', folder: null };
+    var m = U.modal('<h3>☁️ Simpan rekap ke Google Drive</h3>' +
+      '<p class="muted small">Rekap disimpan sebagai Google Sheets lengkap dengan diagram dan analisis soal. Menyimpan ulang akan memperbarui file yang sama.</p>' +
+      '<p class="lbl">Bentuk file</p><div class="pick-row">' +
+      '<label class="pick"><input type="radio" name="xm" value="perClass" checked><span><b>📚 Satu file per kelas</b><small>Setiap kelas punya file sendiri</small></span></label>' +
+      '<label class="pick"><input type="radio" name="xm" value="combined"><span><b>🗂️ Satu file semua kelas</b><small>Semua kelas dalam satu file</small></span></label></div>' +
+      '<p class="lbl">Lokasi penyimpanan</p><div class="pick-row">' +
+      '<label class="pick"><input type="radio" name="xl" value="auto" checked><span><b>📁 Otomatis</b><small id="xauto">Memuat…</small></span></label>' +
+      '<label class="pick"><input type="radio" name="xl" value="custom"><span><b>📂 Pilih folder sendiri</b><small id="xcustom">Belum dipilih</small></span></label></div>' +
+      '<div class="row end"><button type="button" class="link" data-x="pick">📂 Pilih / ganti folder…</button></div>' +
+      '<div class="row end gap"><button class="btn ghost" data-x="cancel">Batal</button><button class="btn glow" data-x="go">☁️ Simpan ke Drive</button></div>', { wide: true });
+    var autoText = function (info) {
+      var base = (info ? info.root.name + ' / ' + info.schoolYear : 'Folder utama / Tahun ajaran') + ' / ' + (g.subject || 'Umum');
+      $('#xauto', m.el).textContent = base + (st.mode === 'perClass' ? ' / [Kelas]' : '');
+    };
+    var info = null;
+    autoText(null);
+    Api.call('getConfig').then(function (r) { info = r.drive; autoText(info); }).catch(function () { /* tampilkan teks umum */ });
+    m.el.addEventListener('change', function (e) {
+      if (e.target.name === 'xm') { st.mode = e.target.value; autoText(info); }
+      if (e.target.name === 'xl' && e.target.value === 'custom' && !st.folder) chooseFolder();
+    });
+    function chooseFolder() {
+      folderPicker({ title: 'Pilih folder tujuan rekap' }).then(function (f) {
+        if (!f) {
+          if (!st.folder) $('input[name=xl][value=auto]', m.el).checked = true;
+          return;
+        }
+        st.folder = f;
+        $('#xcustom', m.el).textContent = f.path;
+        $('input[name=xl][value=custom]', m.el).checked = true;
+      });
+    }
+    m.el.addEventListener('click', function (e) {
+      var a = e.target.getAttribute('data-x');
+      if (a === 'cancel') m.close();
+      if (a === 'pick') chooseFolder();
+      if (a !== 'go') return;
+      var custom = $('input[name=xl][value=custom]', m.el).checked;
+      if (custom && !st.folder) { chooseFolder(); return; }
+      e.target.disabled = true;
+      e.target.textContent = 'Menyimpan… (bisa sampai 1 menit)';
+      Api.call('exportDrive', { code: g.code, mode: st.mode, folderId: custom ? st.folder.id : '' }).then(function (r) {
+        m.close();
+        U.sfx.correct();
+        U.modal('<div class="center-box"><div class="big-emoji">✅</div><h3>Tersimpan di Google Drive!</h3></div>' +
+          '<ul class="file-list">' + r.files.map(fileItem).join('') + '</ul>', { wide: true });
+        loadHistory(g);
+      }).catch(function (err) {
+        e.target.disabled = false;
+        e.target.textContent = '☁️ Simpan ke Drive';
+        U.toast(err.message, 'err');
+      });
+    });
+  }
+
+  // Penjelajah folder Google Drive. Hasil: Promise {id, name, path} atau null bila dibatalkan.
+  function folderPicker(opts) {
+    opts = opts || {};
+    return new Promise(function (resolve) {
+      var done = false;
+      var cur = null;
+      var m = U.modal('<h3>' + esc(opts.title || 'Pilih folder') + '</h3><div id="fp"><div class="center-box"><div class="spinner dark"></div></div></div>',
+        { wide: true, onClose: function () { if (!done) resolve(null); } });
+      function open(parentId, fromMyDrive) {
+        $('#fp', m.el).innerHTML = '<div class="center-box"><div class="spinner dark"></div></div>';
+        Api.call('driveFolders', { parentId: parentId || '', fromMyDrive: !!fromMyDrive }).then(draw).catch(function (err) {
+          $('#fp', m.el).innerHTML = '<div class="notice err">' + esc(err.message) + '</div><button class="btn ghost" data-top>Kembali ke Drive Saya</button>';
+        });
+      }
+      function draw(r) {
+        cur = r;
+        $('#fp', m.el).innerHTML =
+          '<div class="crumbs">' + r.crumbs.map(function (c, i) {
+            return (i ? '<span>›</span>' : '') + '<button data-open="' + esc(c.id) + '">' + (i ? '' : '🏠 ') + esc(c.name) + '</button>';
+          }).join('') + '</div>' +
+          '<ul class="folder-list">' + (r.children.length ? r.children.map(function (c) {
+            return '<li><button data-open="' + esc(c.id) + '">📁 ' + esc(c.name) + '</button></li>';
+          }).join('') : '<li class="muted small">Belum ada subfolder di sini.</li>') + '</ul>' +
+          '<div class="copy-row"><input id="fpnew" maxlength="80" placeholder="Nama folder baru, cth. Kelas XI IPA 1"><button class="btn small" data-new>＋ Buat folder</button></div>' +
+          '<div class="row between gap wrap fp-foot"><span class="muted small">Folder terpilih: <b>' + esc(r.crumbs.map(function (c) { return c.name; }).join(' / ')) + '</b></span>' +
+          '<button class="btn glow" data-choose>✔ Pilih folder ini</button></div>';
+      }
+      m.el.addEventListener('click', function (e) {
+        var b = e.target.closest('button');
+        if (!b) return;
+        if (b.hasAttribute('data-open')) open(b.getAttribute('data-open'));
+        if (b.hasAttribute('data-top')) open('', true);
+        if (b.hasAttribute('data-new')) {
+          var name = $('#fpnew', m.el).value.trim();
+          if (!name) { $('#fpnew', m.el).focus(); return; }
+          b.disabled = true;
+          Api.call('driveCreateFolder', { parentId: cur.folder.id, name: name }).then(function (r) {
+            U.toast('Folder "' + r.folder.name + '" dibuat ✓', 'ok');
+            open(r.folder.id);
+          }).catch(function (err) { b.disabled = false; U.toast(err.message, 'err'); });
+        }
+        if (b.hasAttribute('data-choose') && cur) {
+          done = true;
+          resolve({ id: cur.folder.id, name: cur.folder.name, url: cur.folder.url, path: cur.crumbs.map(function (c) { return c.name; }).join(' / ') });
+          m.close();
+        }
+      });
+      open(opts.parentId || '', !!opts.fromMyDrive);
+    });
   }
 
   function attemptsModal(g, list) {
     list = list.slice().sort(function (a, b) { return a.attempt - b.attempt; });
     var p = list[0];
-    U.modal('<h3>' + esc(p.name) + ' <small class="muted">' + esc(p.cls) + ' · ' + esc(p.sid) + '</small></h3>' +
+    U.modal('<h3>' + esc(p.name) + ' <small class="muted">' + esc(p.cls) + (p.sid ? ' · ' + esc(p.sid) : '') + (p.email ? ' · ' + esc(p.email) : '') + '</small></h3>' +
       '<div class="table-wrap"><table class="tbl"><thead><tr><th>Ke-</th><th>Status</th><th>Nilai</th><th>Benar</th><th>Durasi</th><th>⚠️</th><th>Mulai</th></tr></thead><tbody>' +
       list.map(function (r) {
         return '<tr><td>' + r.attempt + '</td><td>' + (r.status === 'done' ? '✅ Selesai' : '⏸️ Tidak selesai') + '</td><td>' + (r.status === 'done' ? r.score : '-') + '</td>' +
-          '<td>' + r.correct + '/' + r.total + '</td><td>' + U.fmtTime(r.durationSec) + '</td><td>' + r.violations + '</td><td class="small">' + U.fmtDate(r.startedAt) + '</td></tr>';
+          '<td>' + r.correct + '/' + r.total + '</td><td>' + U.fmtTime(r.durationSec) + '</td><td>' + r.violations + '</td><td class="small">' + U.fmtDate(r.startedAt) +
+          (r.flags ? '<br><span class="badge warn">⏰ ' + esc(r.flags) + '</span>' : '') + '</td></tr>';
       }).join('') + '</tbody></table></div>', { wide: true });
   }
 
@@ -909,7 +1062,10 @@ var Teacher = (function () {
       '<p>Status: <b>' + (local ? '💻 Mode Lokal (belum terhubung)' : '☁️ Terhubung ke Google Sheets') + '</b></p>' +
       '<label>URL Web App<input id="surl" value="' + esc(Api.url()) + '" placeholder="https://script.google.com/macros/s/…/exec"></label>' +
       '<div class="row gap wrap"><button class="btn" id="stest">🔌 Uji koneksi</button><button class="btn glow" id="ssave">💾 Simpan</button>' +
-      (local ? '' : '<button class="btn ghost" id="sclear">Kembali ke Mode Lokal</button>') + '</div></section>' +
+      (local ? '' : '<button class="btn ghost" id="sclear">Kembali ke Mode Lokal</button>') + '</div>' +
+      (local ? '' : '<p class="small muted" style="margin-top:12px">Versi backend (Code.gs): <b>' + (Api.backendVersion() || '?') + '</b> · dibutuhkan: <b>' +
+        Api.REQUIRED_BACKEND + '</b> ' + (Api.backendOutdated() ? '⚠️' : '✅') + '</p>') + '</section>' +
+      (local ? '' : (Api.backendOutdated() ? updateGuide() : '<div id="cloudcfg"><div class="card center-box"><div class="spinner dark"></div><p>Memuat pengaturan Google…</p></div></div>')) +
 
       '<section class="card guide"><h3>📘 Cara menghubungkan (sekali saja, ±10 menit)</h3><ol>' +
       '<li>Buka <a href="https://sheets.new" target="_blank" rel="noopener">sheets.new</a> untuk membuat Google Sheets baru, beri nama misalnya <b>Database Game Belajar</b>.</li>' +
@@ -919,13 +1075,15 @@ var Teacher = (function () {
       '<li>Klik <b>Terapkan → Deployment baru</b> → pilih jenis <b>Aplikasi web</b>. Setel <i>Jalankan sebagai:</i> <b>Saya</b>, <i>Yang memiliki akses:</i> <b>Siapa saja</b>. Klik <b>Terapkan</b> dan izinkan aksesnya.</li>' +
       '<li>Salin <b>URL aplikasi web</b> (berakhiran <code>/exec</code>), tempel di kolom di atas, lalu klik <b>Simpan</b>.</li>' +
       '<li>Keluar lalu masuk lagi menggunakan kata sandi yang Anda isi pada <b>TEACHER_KEY</b>.</li></ol>' +
-      '<p class="muted small">Semua nilai tersimpan di Google Sheets tersebut (lembar <b>Results</b>), dan tombol "Simpan ke Google Drive" di Rekap membuat file rekap lengkap dengan diagram di folder <b>Rekap Game Belajar</b>. ' +
+      '<p class="muted small">Semua nilai tersimpan di Google Sheets tersebut (lembar <b>Results</b>). Tombol "Simpan ke Google Drive" di Rekap membuat file rekap lengkap dengan diagram di folder Drive yang Anda atur di halaman ini. ' +
       'Jika Anda mengubah Code.gs, buat ulang deployment melalui <b>Terapkan → Kelola deployment → Edit → Versi baru</b>.</p></section>' +
 
       (local ? '<section class="card"><h3>💾 Cadangan data Mode Lokal</h3><p class="muted">Pindahkan data lokal ke perangkat lain atau simpan sebagai cadangan.</p>' +
         '<div class="row gap wrap"><button class="btn ghost" id="bk">⬇️ Unduh cadangan</button><label class="btn ghost">⬆️ Pulihkan cadangan<input type="file" accept=".json" id="rs" hidden></label>' +
         '<button class="btn ghost" id="pin">🔑 Ganti PIN</button></div>' +
         '<p class="muted small">Untuk memindahkan game ke Google Sheets: Aktivitas Saya → Ekspor semua, hubungkan Google Sheets, lalu Impor file tersebut.</p></section>' : ''));
+
+    if (!local && !Api.backendOutdated()) cloudSettings();
 
     $('#stest').onclick = function () {
       var u = $('#surl').value.trim();
@@ -958,6 +1116,88 @@ var Teacher = (function () {
         LocalDB.setPin(v); Api.setAuth(v); m.close(); U.toast('PIN diganti ✓', 'ok');
       };
     };
+  }
+
+  function updateGuide() {
+    return '<section class="card guide"><h3>⚙️ Cara memperbarui Code.gs (versi ' + Api.REQUIRED_BACKEND + ')</h3><ol>' +
+      '<li>Buka file <a href="backend/Code.gs" target="_blank">backend/Code.gs</a>, pilih semua (Ctrl+A) dan salin (Ctrl+C).</li>' +
+      '<li>Di editor Google Apps Script, klik di area kode, tekan Ctrl+A lalu Delete sampai kosong, kemudian tempel (Ctrl+V). Klik 💾 Simpan.</li>' +
+      '<li>Klik <b>Terapkan → Kelola deployment</b> → ikon ✏️ → <b>Versi: Versi baru</b> → <b>Terapkan</b>. Izinkan akses tambahan bila diminta.</li>' +
+      '<li>Kembali ke aplikasi, klik <b>Keluar</b>, lalu masuk lagi.</li></ol>' +
+      '<p class="muted small">Data nilai dan game tidak berubah. URL /exec tetap sama.</p></section>';
+  }
+
+  function cloudSettings() {
+    Api.call('getConfig').then(function (r) {
+      var c = r.config, d = r.drive;
+      var box = $('#cloudcfg');
+      if (!box) return;
+      var origin = location.origin;
+      box.innerHTML =
+        '<section class="card"><h3>🔐 Login Google untuk siswa</h3>' +
+        '<p class="muted">Agar siswa bisa masuk dengan Gmail, isi <b>Client ID</b> dari Google Cloud Console. Client ID bukan rahasia (aman ditampilkan), berbeda dengan kata sandi guru.</p>' +
+        '<label>OAuth Client ID<input id="cid" value="' + esc(c.googleClientId) + '" placeholder="1234567890-abc123.apps.googleusercontent.com"></label>' +
+        '<p class="small">Status: <b>' + (c.googleClientId ? '✅ Aktif — pilih "Akun Google" di pengaturan game' : '⏸️ Belum diatur') + '</b></p>' +
+        '<details class="small"><summary>Cara membuat Client ID</summary><ol>' +
+        '<li>Buka <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">console.cloud.google.com</a> dan buat project baru (mis. "GameBelajar").</li>' +
+        '<li>Menu <b>Google Auth Platform</b> (atau <b>APIs & Services → OAuth consent screen</b>) → <b>Get started</b>. Isi nama aplikasi & email, pilih <b>External</b>.</li>' +
+        '<li>Di bagian <b>Audience</b>, klik <b>Publish app</b> agar semua akun Gmail bisa masuk.</li>' +
+        '<li>Menu <b>Clients</b> (Credentials) → <b>Create client</b> → jenis <b>Web application</b>.</li>' +
+        '<li><b>Authorized JavaScript origins</b>: tambahkan <code>' + esc(origin) + '</code>. Klik <b>Create</b>.</li>' +
+        '<li>Salin <b>Client ID</b> lalu tempel di kolom di atas dan klik Simpan.</li></ol></details>' +
+        '<div class="row end"><button class="btn" id="savecid">💾 Simpan Client ID</button></div></section>' +
+
+        '<section class="card"><h3>📁 Folder Google Drive</h3>' +
+        '<p class="muted">Rekap otomatis disusun dengan struktur: <b>Folder utama / Tahun ajaran / Mata pelajaran / Kelas</b>.</p>' +
+        '<div class="drive-root"><span class="fi-icon">📁</span><span class="fi-main"><b id="rootname">' + esc(d.root.path || d.root.name) + '</b>' +
+        '<small class="muted">' + (d.root.pending ? 'Akan dibuat otomatis di Drive Saya saat pertama menyimpan.' : 'Folder utama') + '</small></span>' +
+        (d.root.url ? '<a class="btn small ghost" href="' + esc(d.root.url) + '" target="_blank" rel="noopener">Buka ↗</a>' : '') +
+        '<button class="btn small" id="chroot">Ganti folder…</button></div>' +
+        '<label>Tahun ajaran<input id="sy" value="' + esc(c.schoolYear) + '" placeholder="' + esc(d.schoolYear) + ' (otomatis)"><small>Kosongkan agar dihitung otomatis (tahun ajaran baru mulai Juli).</small></label>' +
+        '<div class="row end gap"><button class="btn" id="savedrive">💾 Simpan pengaturan folder</button></div></section>' +
+
+        '<section class="card"><h3>🌙 Simpan otomatis setiap malam</h3>' +
+        '<label class="switch"><input type="checkbox" id="auto" ' + (c.autoSave ? 'checked' : '') + '><span class="sw"></span><span>Aktifkan simpan otomatis' +
+        '<small>Setiap hari sekitar pukul ' + d.autoSaveHour + '.00 (zona waktu skrip: ' + esc(d.timeZone) + '), rekap game yang ada aktivitas baru diperbarui di Drive.</small></span></label>' +
+        '<label>Bentuk file<select id="amode"><option value="perClass" ' + (c.autoSaveMode !== 'combined' ? 'selected' : '') + '>Satu file per kelas</option>' +
+        '<option value="combined" ' + (c.autoSaveMode === 'combined' ? 'selected' : '') + '>Satu file semua kelas</option></select></label>' +
+        '<p class="small">Status pemicu: <b>' + (d.triggerActive ? '✅ aktif' : '⏸️ tidak aktif') + '</b>' +
+        (c.lastAutoSave ? ' · terakhir berjalan: ' + U.fmtDate(c.lastAutoSave) : '') + '</p>' +
+        '<div class="row end gap wrap"><button class="btn ghost" id="runnow">▶️ Jalankan sekarang</button><button class="btn" id="saveauto">💾 Simpan</button></div></section>';
+
+      function save(btn, cfg, msg) {
+        btn.disabled = true;
+        return Api.call('saveConfig', { config: cfg }).then(function (res) {
+          Api.setBackendInfo({ version: Api.backendVersion(), googleLogin: !!res.config.googleClientId });
+          U.toast(msg, 'ok');
+          settings();
+        }).catch(function (err) { btn.disabled = false; U.toast(err.message, 'err'); });
+      }
+      $('#savecid').onclick = function () { save(this, { googleClientId: $('#cid').value.trim() }, 'Client ID tersimpan ✓'); };
+      $('#savedrive').onclick = function () { save(this, { schoolYear: $('#sy').value.trim() }, 'Pengaturan folder tersimpan ✓'); };
+      $('#saveauto').onclick = function () {
+        save(this, { autoSave: $('#auto').checked, autoSaveMode: $('#amode').value }, $('#auto').checked ? 'Simpan otomatis aktif ✓' : 'Simpan otomatis dimatikan');
+      };
+      $('#chroot').onclick = function () {
+        folderPicker({ title: 'Pilih folder utama untuk semua rekap', fromMyDrive: true }).then(function (f) {
+          if (f) save($('#chroot'), { driveRootId: f.id }, 'Folder utama diganti ke "' + f.name + '" ✓');
+        });
+      };
+      $('#runnow').onclick = function () {
+        var b = this;
+        b.disabled = true; b.textContent = 'Menyimpan… (bisa beberapa menit)';
+        Api.call('runAutoSave').then(function (res) {
+          U.modal('<h3>🌙 Simpan otomatis selesai</h3>' + (res.saved.length ? '<ul>' + res.saved.map(function (x) {
+            return '<li>' + esc(x.title) + ' — ' + x.files + ' file</li>';
+          }).join('') + '</ul>' : '<p>Tidak ada aktivitas baru sejak penyimpanan terakhir.</p>') +
+            (res.errors.length ? '<div class="notice err">' + res.errors.map(esc).join('<br>') + '</div>' : ''));
+          settings();
+        }).catch(function (err) { b.disabled = false; b.textContent = '▶️ Jalankan sekarang'; U.toast(err.message, 'err'); });
+      };
+    }).catch(function (err) {
+      var box = $('#cloudcfg');
+      if (box) box.innerHTML = '<div class="notice err">' + esc(err.message) + '</div>';
+    });
   }
 
   return { route: route };

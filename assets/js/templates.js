@@ -24,7 +24,8 @@ var QTYPES = {
 var DEFAULT_SETTINGS = {
   questionCount: 0, timePerQuestion: 30, maxAttempts: 1, scorePolicy: 'best', kkm: 75,
   openAt: '', closeAt: '', active: true, shuffleQuestions: true, shuffleOptions: true,
-  showFeedback: true, showLeaderboard: true, powerUps: true, antiCheat: 3
+  showFeedback: true, showLeaderboard: true, powerUps: true, antiCheat: 3,
+  loginMode: 'form', allowedDomain: ''
 };
 
 function mcq(q, options, answer) { return { type: 'mcq', q: q, options: options, answer: answer }; }

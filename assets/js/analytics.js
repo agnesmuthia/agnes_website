@@ -54,7 +54,7 @@ var Analytics = (function () {
 
     var avgTime = mean(done.map(function (p) { return p.durationSec; }));
     var suspicious = done.filter(function (p) {
-      return p.violations >= Math.max(1, Number(s.antiCheat) || 2) || (p.total && p.durationSec / p.total < 3 && p.score >= 80);
+      return p.flags || p.violations >= Math.max(1, Number(s.antiCheat) || 2) || (p.total && p.durationSec / p.total < 3 && p.score >= 80);
     });
 
     return {
@@ -113,7 +113,7 @@ var Analytics = (function () {
     }
     if (A.suspicious.length) {
       out.push({ t: 'bad', h: A.suspicious.length + ' hasil perlu diverifikasi',
-        p: 'Terdeteksi sering keluar dari halaman game atau menjawab sangat cepat dengan nilai tinggi. Konfirmasi langsung kepada siswa sebelum nilai digunakan.' });
+        p: 'Terdeteksi sering keluar dari halaman game, menjawab sangat cepat dengan nilai tinggi, atau mengirim jawaban terlambat. Konfirmasi langsung kepada siswa sebelum nilai digunakan.' });
     }
     if (A.unfinished) {
       out.push({ t: 'info', h: A.unfinished + ' siswa belum menyelesaikan game',
