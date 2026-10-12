@@ -34,30 +34,8 @@ var Student = (function () {
 
   function progKey(code) { return 'gb_prog_' + code; }
 
-  /* ---------- Login Google (Google Identity Services) ---------- */
-  var gisPromise = null;
-  function loadGis() {
-    if (window.google && window.google.accounts && window.google.accounts.id) return Promise.resolve();
-    if (!gisPromise) {
-      gisPromise = new Promise(function (resolve, reject) {
-        var sc = document.createElement('script');
-        sc.src = 'https://accounts.google.com/gsi/client';
-        sc.async = true;
-        sc.onload = resolve;
-        sc.onerror = function () { gisPromise = null; reject(new Error('Gagal memuat login Google. Periksa koneksi internet.')); };
-        document.head.appendChild(sc);
-      });
-    }
-    return gisPromise;
-  }
+  var loadGis = U.loadGis, jwtPayload = U.jwtPayload;
 
-  // Hanya untuk tampilan (nama & email). Keabsahan token diperiksa di server.
-  function jwtPayload(token) {
-    try {
-      var b = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-      return JSON.parse(decodeURIComponent(escape(atob(b))));
-    } catch (e) { return {}; }
-  }
   function loadProgress(code) { try { return JSON.parse(localStorage.getItem(progKey(code))); } catch (e) { return null; } }
   function persist() { if (S) localStorage.setItem(progKey(S.code), JSON.stringify(S)); }
 
@@ -119,8 +97,9 @@ var Student = (function () {
       var useGoogle = s.loginMode === 'google';
       var gUser = null;
       var prog = loadProgress(code);
+      var md = MODES[g.mode] || MODES.classic;
       var info = [
-        ['📚', g.subject || 'Umum'], ['❓', g.questionCount + ' soal'],
+        [md.icon, md.name], ['📚', g.subject || 'Umum'], ['❓', g.questionCount + ' soal'],
         ['⏱️', s.timePerQuestion ? s.timePerQuestion + ' dtk/soal' : 'Tanpa batas waktu'],
         ['🔁', s.maxAttempts ? s.maxAttempts + 'x kesempatan' : 'Tak terbatas'], ['🎯', 'KKM ' + s.kkm]
       ];
@@ -136,7 +115,7 @@ var Student = (function () {
         '<h1>' + esc(g.title) + '</h1>' +
         (g.description ? '<p class="muted">' + esc(g.description) + '</p>' : '') +
         '<div class="info-grid">' + info.map(function (x) { return '<div><span>' + x[0] + '</span>' + esc(x[1]) + '</div>'; }).join('') + '</div>' +
-        '<ul class="rules">' +
+        '<ul class="rules"><li>🎮 <b>Cara main:</b> ' + esc(md.how) + '</li>' +
         (s.antiCheat ? '<li>🛡️ Jangan keluar dari halaman game. Batas pindah tab: <b>' + s.antiCheat + 'x</b>, setelah itu jawaban otomatis dikumpulkan.</li>' : '') +
         '<li>⚠️ Menekan "Mulai" langsung memakai 1 kesempatan.</li>' +
         (s.powerUps ? '<li>🎁 Ada power-up yang bisa kamu pakai sekali!</li>' : '') +
@@ -249,14 +228,6 @@ var Student = (function () {
     }, 800);
   }
 
-  function startPlay() {
-    S.active = true;
-    S.sending = false;
-    if (S.idx >= S.served.length) { finish(); return; }
-    document.addEventListener('visibilitychange', onVisibility);
-    renderQuestion();
-  }
-
   /* ================= ANTI-CURANG ================= */
   function onVisibility() {
     if (!S || !S.active || S.submitted) return;
@@ -281,37 +252,102 @@ var Student = (function () {
     m.el.querySelector('[data-ok]').onclick = m.close;
   }
 
+  /* ================= MESIN PERMAINAN ================= */
+  var NONSEQ = { wheel: 1, box: 1 };   // mode yang urutan soalnya dipilih siswa
+  var qHooks = [];                     // pembersih (interval, animasi, keyboard) per soal
+  function onQEnd(fn) { qHooks.push(fn); }
+  function qEnd() { qHooks.splice(0).forEach(function (f) { try { f(); } catch (e) { /* abaikan */ } }); }
+  function gmode() { return (S && S.game && MODES[S.game.mode]) ? S.game.mode : 'classic'; }
+  function range(n) { var r = []; for (var i = 0; i < n; i++) r.push(i); return r; }
+
+  function startPlay() {
+    S.active = true;
+    S.sending = false;
+    S.done = S.done || [];
+    S.fracs = S.fracs || {};
+    document.removeEventListener('visibilitychange', onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
+    proceed();
+  }
+
+  function proceed() {
+    var n = S.served.length;
+    if (NONSEQ[gmode()]) {
+      if (S.done.length >= n) { finish(); return; }
+      if (gmode() === 'wheel') showWheel(); else showBoxes();
+      return;
+    }
+    if (S.idx >= n) { finish(); return; }
+    renderQuestion();
+  }
+
+  function hudHtml() {
+    var total = S.served.length, done = S.done.length;
+    return '<div class="hud">' +
+      '<div class="hud-q">Soal <b>' + Math.min(done + 1, total) + '</b>/' + total + '</div>' +
+      '<div class="hud-progress"><i style="width:' + (done / total * 100) + '%"></i></div>' +
+      '<div class="hud-xp">⭐ <b id="xp">' + S.xp + '</b></div>' +
+      '<div class="hud-combo ' + (S.combo >= 2 ? 'on' : '') + '" id="combo">🔥 x' + S.combo + '</div>' + muteBtn() +
+      '</div>';
+  }
+
+  var RENDER = {
+    mcq: renderMcq, tf: renderTf, short: renderShort, match: renderMatch, order: renderOrder, group: renderGroup,
+    word: renderAnagram, cloze: renderCloze, multi: renderMulti, wordsearch: renderWordsearch
+  };
+  var MODE_RENDER = {
+    balloon: { mcq: renderBalloon, tf: renderBalloon }, memory: { match: renderMemory },
+    whack: { multi: renderWhack }, hangman: { word: renderHangman }
+  };
+  var MODE_LABEL = {
+    balloon: '🎈 Balon Meletus <span>· Letuskan balon jawaban yang benar</span>',
+    memory: '🃏 Kartu Memori <span>· Temukan semua pasangan</span>',
+    whack: '🔨 Pukul Tikus <span>· Pukul hanya yang benar!</span>',
+    hangman: '🔡 Tebak Kata <span>· Petunjuk</span>'
+  };
+
+  function pickRenderer(q) {
+    var m = gmode();
+    var fn = (MODE_RENDER[m] && MODE_RENDER[m][q.type]) || RENDER[q.type] || renderUnknown;
+    // Mode latihan butuh kunci; bila backend lama tidak mengirimnya, pakai tampilan standar.
+    if ((fn === renderHangman || fn === renderMemory) && q.ans === undefined) fn = RENDER[q.type];
+    return fn;
+  }
+
   /* ================= SOAL ================= */
   function renderQuestion() {
+    qEnd();
     clearInterval(timer);
+    var m = gmode();
     var q = S.served[S.idx];
-    var total = S.served.length;
     var set = S.game.settings;
-    var type = QTYPES[q.type];
+    var fn = pickRenderer(q);
+    var type = QTYPES[q.type] || { icon: '❓', name: 'Soal', hint: '' };
+    S.st = {};
     S.qStart = Date.now();
-    S.timeLimit = set.timePerQuestion;
+    S.timeLimit = q.time !== undefined ? Number(q.time) : Number(set.timePerQuestion) || 0;
+    if (!S.timeLimit && fn === renderWhack) S.timeLimit = Math.max(20, q.items.length * 3); // pukul tikus selalu berwaktu
     S.extra = 0;
     S.locked = false;
+
+    var label = (fn !== RENDER[q.type] && MODE_LABEL[m]) ? MODE_LABEL[m]
+      : type.icon + ' ' + type.name + ' <span>· ' + type.hint + '</span>';
+    if (fn === renderAnagram) label = '🔤 Susun Huruf <span>· Petunjuk</span>';
 
     var power = '';
     if (set.powerUps) {
       var canFifty = q.type === 'mcq' && q.ans !== undefined && q.options.length > 2 && !S.used.fifty;
-      var canTime = set.timePerQuestion > 0 && !S.used.time;
+      var canTime = S.timeLimit > 0 && !S.used.time;
       power = '<div class="powerups">' +
         (q.ans !== undefined && q.type === 'mcq' ? '<button class="pu" id="pu-fifty" ' + (canFifty ? '' : 'disabled') + '>✂️ 50:50</button>' : '') +
-        (set.timePerQuestion > 0 ? '<button class="pu" id="pu-time" ' + (canTime ? '' : 'disabled') + '>⏳ +15 detik</button>' : '') + '</div>';
+        (S.timeLimit > 0 && fn !== renderWhack ? '<button class="pu" id="pu-time" ' + (canTime ? '' : 'disabled') + '>⏳ +15 detik</button>' : '') + '</div>';
     }
+    var compact = { wordsearch: 1, match: fn === renderMemory, multi: fn === renderWhack };
 
     root().innerHTML = themed(S.game.theme,
-      '<div class="play">' +
-      '<div class="hud">' +
-      '<div class="hud-q">Soal <b>' + (S.idx + 1) + '</b>/' + total + '</div>' +
-      '<div class="hud-progress"><i style="width:' + (S.idx / total * 100) + '%"></i></div>' +
-      '<div class="hud-xp">⭐ <b id="xp">' + S.xp + '</b></div>' +
-      '<div class="hud-combo ' + (S.combo >= 2 ? 'on' : '') + '" id="combo">🔥 x' + S.combo + '</div>' + muteBtn() +
-      '</div>' +
-      (set.timePerQuestion ? '<div class="timer"><i id="tbar"></i><span id="tnum">' + set.timePerQuestion + '</span></div>' : '') +
-      '<div class="qcard pop"><div class="qtype">' + type.icon + ' ' + type.name + ' <span>· ' + type.hint + '</span></div>' +
+      '<div class="play mode-' + m + '">' + hudHtml() +
+      (S.timeLimit ? '<div class="timer"><i id="tbar"></i><span id="tnum">' + S.timeLimit + '</span></div>' : '') +
+      '<div class="qcard pop' + (compact[q.type] ? ' compact' : '') + '"><div class="qtype">' + label + '</div>' +
       '<h2 class="qtext">' + esc(q.q) + '</h2>' +
       (q.img ? '<img class="qimg" src="' + esc(q.img) + '" alt="Gambar soal" loading="lazy">' : '') + '</div>' +
       '<div class="answers" id="answers"></div>' + power +
@@ -320,13 +356,13 @@ var Student = (function () {
     bindMute(root());
 
     var box = $('#answers');
-    ({ mcq: renderMcq, tf: renderTf, short: renderShort, match: renderMatch, order: renderOrder })[q.type](q, box);
+    fn(q, box);
 
     var f = $('#pu-fifty');
     if (f) f.onclick = function () {
       if (S.locked) return;
       S.used.fifty = true; f.disabled = true; U.sfx.combo();
-      var wrong = $$('.opt', box).filter(function (b) { return Number(b.dataset.i) !== q.ans; });
+      var wrong = $$('[data-i]', box).filter(function (b) { return Number(b.dataset.i) !== q.ans; });
       Logic.shuffle(wrong).slice(0, Math.max(0, q.options.length - 2)).forEach(function (b) { b.classList.add('gone'); b.disabled = true; });
       persist();
     };
@@ -336,7 +372,7 @@ var Student = (function () {
       S.used.time = true; t.disabled = true; S.extra += 15; U.sfx.combo(); persist();
     };
 
-    if (set.timePerQuestion) {
+    if (S.timeLimit) {
       var lastSec = -1;
       timer = setInterval(function () {
         var left = S.timeLimit + S.extra - (Date.now() - S.qStart) / 1000;
@@ -355,16 +391,23 @@ var Student = (function () {
   function timeUp() {
     var q = S.served[S.idx];
     var partial = collectPartial(q);
-    fx('<div class="fx-big">⏰ Waktu habis!</div>');
+    fx('<div class="fx-big">' + (pickRenderer(q) === renderWhack ? '⏱️ Selesai!' : '⏰ Waktu habis!') + '</div>');
     lock(partial);
   }
 
-  // Jawaban sebagian (menjodohkan/mengurutkan) tetap dihitung saat waktu habis.
+  // Jawaban sebagian tetap dihitung saat waktu habis.
   function collectPartial(q) {
+    if (S.st && S.st.get) return S.st.get();
     if (q.type === 'match' && S.matchState) return S.matchState.slice();
     if (q.type === 'order' && S.orderState) return S.orderState.slice();
     if (q.type === 'short') { var i = $('#short'); return i && i.value.trim() ? i.value.trim() : null; }
     return null;
+  }
+
+  function renderUnknown(q, box) {
+    box.innerHTML = '<div class="answer-key">Jenis soal ini belum didukung di perangkat ini. Lanjut ke soal berikutnya.</div>' +
+      '<button class="btn big glow" id="skip">Lanjut ▶</button>';
+    $('#skip').onclick = function () { lock(null); };
   }
 
   function renderMcq(q, box) {
@@ -481,6 +524,590 @@ var Student = (function () {
     draw();
   }
 
+  /* ---------- Kelompokkan ---------- */
+  function renderGroup(q, box) {
+    var st = S.st;
+    st.place = q.items.map(function () { return null; });
+    st.get = function () { return st.place.slice(); };
+    var sel = 0;
+    function next() { var i = st.place.indexOf(null); return i >= 0 ? i : null; }
+    function chip(i) {
+      return '<button type="button" class="sitem' + (sel === i ? ' sel' : '') + '" draggable="true" data-i="' + i + '">' + esc(q.items[i]) + '</button>';
+    }
+    function draw() {
+      var tray = q.items.map(function (_, i) { return st.place[i] === null ? chip(i) : ''; }).join('');
+      box.innerHTML = '<div class="gsort">' +
+        '<div class="gtray" data-bin="tray">' + (tray || '<span class="hint">Semua item sudah ditempatkan ✔</span>') + '</div>' +
+        '<div class="gbins n' + q.groups.length + '">' + q.groups.map(function (g, gi) {
+          return '<div class="gbin c' + gi + (sel !== null ? ' ready' : '') + '" data-bin="' + gi + '"><div class="gbin-h">' + esc(g) + '</div><div class="gbin-b">' +
+            q.items.map(function (_, i) { return st.place[i] === gi ? chip(i) : ''; }).join('') + '</div></div>';
+        }).join('') + '</div></div>' +
+        '<p class="hint">Ketuk item, lalu ketuk kelompok tujuannya. Bisa juga diseret.</p>' +
+        '<button class="btn big glow" id="gdone" ' + (next() !== null ? 'disabled' : '') + '>Kunci Jawaban ✔</button>';
+    }
+    function place(i, bin) {
+      st.place[i] = bin === 'tray' ? null : Number(bin);
+      sel = next();
+      U.sfx.click();
+      draw();
+    }
+    box.onclick = function (e) {
+      if (S.locked) return;
+      if (e.target.id === 'gdone') { lock(st.get()); return; }
+      var c = e.target.closest('.sitem');
+      if (c) { var i = Number(c.dataset.i); sel = sel === i ? null : i; U.sfx.click(); draw(); return; }
+      var bin = e.target.closest('[data-bin]');
+      if (bin && sel !== null) place(sel, bin.dataset.bin);
+    };
+    box.ondragstart = function (e) {
+      var c = e.target.closest('.sitem');
+      if (c) { e.dataTransfer.setData('text/plain', c.dataset.i); sel = Number(c.dataset.i); }
+    };
+    box.ondragover = function (e) { if (e.target.closest('[data-bin]')) e.preventDefault(); };
+    box.ondrop = function (e) {
+      var bin = e.target.closest('[data-bin]');
+      if (!bin || S.locked) return;
+      e.preventDefault();
+      place(Number(e.dataTransfer.getData('text/plain')), bin.dataset.bin);
+    };
+    st.reveal = function (a) {
+      var wrong = [];
+      $$('.sitem', box).forEach(function (c) {
+        var i = Number(c.dataset.i);
+        var ok = a && a[i] === q.ans[i];
+        c.classList.add(ok ? 'right' : 'wrong');
+        if (!ok) wrong.push('<div><b>' + esc(q.items[i]) + '</b> → ' + esc(q.groups[q.ans[i]]) + '</div>');
+      });
+      if (wrong.length) box.insertAdjacentHTML('beforeend', '<div class="answer-key">' + wrong.join('') + '</div>');
+    };
+    draw();
+  }
+
+  /* ---------- Susun Huruf ---------- */
+  function renderAnagram(q, box) {
+    var st = S.st;
+    st.slots = [];
+    st.get = function () { return st.slots.map(function (i) { return q.tiles[i]; }).join('') || null; };
+    var pattern = q.pattern && q.pattern.length ? q.pattern : [q.tiles.length];
+    function full() { return st.slots.length === q.tiles.length; }
+    function draw() {
+      var k = 0;
+      var words = pattern.map(function (len) {
+        var out = '';
+        for (var j = 0; j < len; j++, k++) {
+          var ti = st.slots[k];
+          out += '<button type="button" class="slot' + (ti !== undefined ? ' filled' : '') + '" data-s="' + k + '">' + (ti !== undefined ? esc(q.tiles[ti]) : '') + '</button>';
+        }
+        return '<div class="aword">' + out + '</div>';
+      }).join('');
+      box.innerHTML = '<div class="anagram"><div class="aslots">' + words + '</div>' +
+        '<div class="tiles">' + q.tiles.map(function (ch, i) {
+          var used = st.slots.indexOf(i) >= 0;
+          return '<button type="button" class="tile' + (used ? ' used' : '') + '" data-t="' + i + '" ' + (used ? 'disabled' : '') + '>' + esc(ch) + '</button>';
+        }).join('') + '</div>' +
+        '<div class="row center gap wrap"><button type="button" class="btn ghost" id="aback">⌫ Hapus</button>' +
+        '<button type="button" class="btn ghost" id="areset">↺ Ulang</button>' +
+        '<button type="button" class="btn big glow" id="adone" ' + (full() ? '' : 'disabled') + '>Kunci ✔</button></div></div>';
+    }
+    function add(i) {
+      if (st.slots.indexOf(i) >= 0 || full()) return;
+      st.slots.push(i);
+      U.sfx.click();
+      draw();
+      if (full() && q.ans !== undefined && Logic.letters(st.get()) === Logic.letters(q.ans)) setTimeout(function () { lock(st.get()); }, 250);
+    }
+    box.onclick = function (e) {
+      if (S.locked) return;
+      var t = e.target.closest('.tile'), sl = e.target.closest('.slot');
+      if (t) add(Number(t.dataset.t));
+      else if (sl && sl.classList.contains('filled')) { st.slots.splice(Number(sl.dataset.s), 1); U.sfx.click(); draw(); }
+      else if (e.target.id === 'aback') { st.slots.pop(); draw(); }
+      else if (e.target.id === 'areset') { st.slots = []; draw(); }
+      else if (e.target.id === 'adone' && full()) lock(st.get());
+    };
+    function onKey(e) {
+      if (S.locked || e.ctrlKey || e.metaKey) return;
+      var ch = (e.key || '').toUpperCase();
+      if (e.key === 'Backspace') { st.slots.pop(); draw(); e.preventDefault(); return; }
+      if (e.key === 'Enter' && full()) { lock(st.get()); return; }
+      if (ch.length !== 1) return;
+      for (var i = 0; i < q.tiles.length; i++) if (q.tiles[i] === ch && st.slots.indexOf(i) < 0) { add(i); return; }
+    }
+    document.addEventListener('keydown', onKey);
+    onQEnd(function () { document.removeEventListener('keydown', onKey); });
+    st.reveal = function (a) {
+      var ok = Logic.letters(a) === Logic.letters(q.ans);
+      $$('.slot', box).forEach(function (sl) { sl.classList.add(ok ? 'right' : 'wrong'); });
+      if (!ok) box.insertAdjacentHTML('beforeend', '<div class="answer-key">Jawaban benar: <b>' + esc(q.ans) + '</b></div>');
+    };
+    draw();
+  }
+
+  /* ---------- Tebak Kata (hangman) ---------- */
+  function renderHangman(q, box) {
+    var st = S.st;
+    var word = String(q.ans).toUpperCase(), target = Logic.letters(word);
+    st.g = [];
+    st.get = function () { return st.g.slice(); };
+    var keys = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+    '0123456789'.split('').forEach(function (d) { if (target.indexOf(d) >= 0) keys.push(d); });
+    function misses() { return st.g.filter(function (c) { return target.indexOf(c) < 0; }).length; }
+    function solved() { return target.split('').every(function (c) { return st.g.indexOf(c) >= 0; }); }
+    function draw(popIdx) {
+      var lives = Logic.HANGMAN_LIVES, miss = misses();
+      var balloons = '';
+      for (var i = 0; i < lives; i++) {
+        balloons += '<span class="hb' + (i < lives - miss ? '' : ' gone') + (i === popIdx ? ' popnow' : '') + '">🎈</span>';
+      }
+      box.innerHTML = '<div class="hangman"><div class="hballoons" aria-label="Sisa nyawa">' + balloons + '<div class="hbasket">🧺</div></div>' +
+        '<div class="hword">' + word.split(' ').map(function (w) {
+          return '<span class="hw">' + w.split('').map(function (c) {
+            var isL = Logic.letters(c) === c && c;
+            var show = !isL || st.g.indexOf(c) >= 0;
+            return '<span class="hl' + (show ? ' open' : '') + '">' + (show ? esc(c) : '') + '</span>';
+          }).join('') + '</span>';
+        }).join('') + '</div>' +
+        '<div class="kb">' + keys.map(function (k) {
+          var used = st.g.indexOf(k) >= 0;
+          return '<button type="button" class="key' + (used ? (target.indexOf(k) >= 0 ? ' hit' : ' miss') : '') + '" data-k="' + k + '" ' + (used ? 'disabled' : '') + '>' + k + '</button>';
+        }).join('') + '</div></div>';
+    }
+    function guess(k) {
+      if (S.locked || st.g.indexOf(k) >= 0 || keys.indexOf(k) < 0) return;
+      st.g.push(k);
+      var hit = target.indexOf(k) >= 0;
+      if (hit) U.sfx.flip(); else U.sfx.pop();
+      draw(hit ? -1 : Logic.HANGMAN_LIVES - misses());
+      if (solved() || misses() >= Logic.HANGMAN_LIVES) setTimeout(function () { lock(st.get()); }, 400);
+    }
+    box.onclick = function (e) { var b = e.target.closest('.key'); if (b) guess(b.dataset.k); };
+    function onKey(e) { if (!e.ctrlKey && !e.metaKey && (e.key || '').length === 1) guess(e.key.toUpperCase()); }
+    document.addEventListener('keydown', onKey);
+    onQEnd(function () { document.removeEventListener('keydown', onKey); });
+    st.reveal = function () {
+      $$('.hl', box).forEach(function (el, i) { if (!el.classList.contains('open')) el.classList.add('missed'); });
+      var chars = word.replace(/ /g, '').split('');
+      $$('.hl', box).forEach(function (el, i) { if (!el.textContent) el.textContent = chars[i] || ''; });
+    };
+    draw(-1);
+  }
+
+  /* ---------- Lengkapi Kalimat ---------- */
+  function renderCloze(q, box) {
+    var st = S.st, nb = q.parts.length - 1;
+    st.fill = range(nb).map(function () { return null; });
+    st.cur = 0;
+    st.get = function () { return st.fill.slice(); };
+    function full() { return st.fill.indexOf(null) < 0; }
+    function draw() {
+      box.innerHTML = '<div class="cloze"><div class="cloze-text">' + q.parts.map(function (p, i) {
+        var b = '';
+        if (i < nb) {
+          var k = st.fill[i];
+          b = '<button type="button" class="blank' + (st.cur === i ? ' cur' : '') + (k !== null ? ' filled' : '') + '" data-b="' + i + '">' +
+            (k !== null ? esc(q.bank[k]) : (i + 1)) + '</button>';
+        }
+        return esc(p) + b;
+      }).join('') + '</div>' +
+        '<div class="bank">' + q.bank.map(function (w, k) {
+          var used = st.fill.indexOf(k) >= 0;
+          return '<button type="button" class="bword' + (used ? ' used' : '') + '" data-k="' + k + '" ' + (used ? 'disabled' : '') + '>' + esc(w) + '</button>';
+        }).join('') + '</div>' +
+        '<p class="hint">Ketuk kata untuk mengisi kotak yang menyala. Ketuk kotak terisi untuk mengosongkannya.</p>' +
+        '<button class="btn big glow" id="cdone" ' + (full() ? '' : 'disabled') + '>Kunci Jawaban ✔</button></div>';
+    }
+    box.onclick = function (e) {
+      if (S.locked) return;
+      if (e.target.id === 'cdone' && full()) { lock(st.get()); return; }
+      var b = e.target.closest('.blank'), w = e.target.closest('.bword');
+      if (b) {
+        var i = Number(b.dataset.b);
+        if (st.fill[i] !== null) st.fill[i] = null;
+        st.cur = i; U.sfx.click(); draw();
+      } else if (w) {
+        st.fill[st.cur] = Number(w.dataset.k);
+        var nxt = -1;
+        for (var j = 1; j <= nb; j++) { var c = (st.cur + j) % nb; if (st.fill[c] === null) { nxt = c; break; } }
+        if (nxt >= 0) st.cur = nxt;
+        U.sfx.click(); draw();
+      }
+    };
+    st.reveal = function (a) {
+      $$('.blank', box).forEach(function (el, i) {
+        var pick = a && a[i] !== null && a[i] !== undefined ? q.ans.bank[a[i]] : '';
+        el.classList.add(Logic.norm(pick) === Logic.norm(q.ans.blanks[i]) ? 'right' : 'wrong');
+      });
+      box.insertAdjacentHTML('beforeend', '<div class="answer-key">' + q.parts.map(function (p, i) {
+        return esc(p) + (i < nb ? '<b>' + esc(q.ans.blanks[i]) + '</b>' : '');
+      }).join('') + '</div>');
+    };
+    draw();
+  }
+
+  /* ---------- Pilih Semua yang Benar ---------- */
+  function renderMulti(q, box) {
+    var st = S.st;
+    st.sel = [];
+    st.get = function () { return st.sel.slice(); };
+    function draw() {
+      box.innerHTML = '<div class="multi">' + q.items.map(function (t, i) {
+        return '<button type="button" class="mopt' + (st.sel.indexOf(i) >= 0 ? ' on' : '') + '" data-i="' + i + '"><span class="tick">✔</span>' + esc(t) + '</button>';
+      }).join('') + '</div><p class="hint">Bisa lebih dari satu jawaban. Pilihan yang salah mengurangi nilai.</p>' +
+        '<button class="btn big glow" id="mudone" ' + (st.sel.length ? '' : 'disabled') + '>Kunci (' + st.sel.length + ' dipilih) ✔</button>';
+    }
+    box.onclick = function (e) {
+      if (S.locked) return;
+      if (e.target.id === 'mudone') { lock(st.get()); return; }
+      var b = e.target.closest('.mopt');
+      if (!b) return;
+      var i = Number(b.dataset.i), at = st.sel.indexOf(i);
+      if (at >= 0) st.sel.splice(at, 1); else st.sel.push(i);
+      U.sfx.click(); draw();
+    };
+    st.reveal = function (a) {
+      $$('.mopt', box).forEach(function (b) {
+        var i = Number(b.dataset.i), picked = (a || []).indexOf(i) >= 0;
+        b.classList.add(q.ans[i] ? (picked ? 'right' : 'missed') : (picked ? 'wrong' : 'dim'));
+      });
+    };
+    draw();
+  }
+
+  /* ---------- Cari Kata ---------- */
+  function wordCells(grid, w) {
+    var n = grid.length, D = [[0, 1], [1, 0], [1, 1], [-1, 1], [0, -1], [-1, 0], [-1, -1], [1, -1]];
+    for (var r = 0; r < n; r++) for (var c = 0; c < grid[r].length; c++) for (var d = 0; d < D.length; d++) {
+      var cells = [], ok = true;
+      for (var i = 0; i < w.length && ok; i++) {
+        var rr = r + D[d][0] * i, cc = c + D[d][1] * i;
+        if (rr < 0 || rr >= n || cc < 0 || cc >= grid[rr].length || grid[rr].charAt(cc) !== w.charAt(i)) ok = false;
+        else cells.push([rr, cc]);
+      }
+      if (ok) return cells;
+    }
+    return [];
+  }
+
+  function lineCells(a, b) {
+    var dr = b.r - a.r, dc = b.c - a.c;
+    if (!(dr === 0 || dc === 0 || Math.abs(dr) === Math.abs(dc))) return [];
+    var n = Math.max(Math.abs(dr), Math.abs(dc)) + 1, sr = Math.sign(dr), sc = Math.sign(dc), out = [];
+    for (var i = 0; i < n; i++) out.push([a.r + sr * i, a.c + sc * i]);
+    return out;
+  }
+
+  function renderWordsearch(q, box) {
+    var st = S.st, grid = q.grid, words = q.words;
+    st.sel = [];
+    st.found = {};
+    st.get = function () { return st.sel.slice(); };
+    box.innerHTML = '<div class="ws"><div class="ws-grid" id="wsg" style="--n:' + grid.length + '">' + grid.map(function (row, r) {
+      return row.split('').map(function (ch, c) { return '<span class="wc" data-r="' + r + '" data-c="' + c + '">' + ch + '</span>'; }).join('');
+    }).join('') + '</div>' +
+      '<ul class="ws-words">' + words.map(function (w, i) { return '<li data-w="' + i + '">' + esc(w) + '</li>'; }).join('') + '</ul></div>' +
+      '<p class="hint">Geser dari huruf pertama ke huruf terakhir, atau ketuk keduanya. <b id="wscount">0</b>/' + words.length + ' kata ditemukan.</p>' +
+      '<button class="btn big ghost" id="wsdone">Selesai ✔</button>';
+    var g = $('#wsg');
+    var cellEls = $$('.wc', g);
+    function cellEl(r, c) { return cellEls[r * grid[0].length + c]; }
+    function at(x, y) {
+      var el = document.elementFromPoint(x, y);
+      el = el && el.closest ? el.closest('.wc') : null;
+      return el && g.contains(el) ? { r: Number(el.dataset.r), c: Number(el.dataset.c) } : null;
+    }
+    function preview(a, b) {
+      cellEls.forEach(function (el) { el.classList.remove('pv'); });
+      (b ? lineCells(a, b) : [[a.r, a.c]]).forEach(function (p) { var el = cellEl(p[0], p[1]); if (el) el.classList.add('pv'); });
+    }
+    function clear() { cellEls.forEach(function (el) { el.classList.remove('pv'); }); }
+    function attempt(a, b) {
+      var t = Logic.lineText(grid, a.r, a.c, b.r, b.c), rev = t.split('').reverse().join('');
+      var wi = -1;
+      words.forEach(function (w, i) { if (wi < 0 && !st.found[i] && t && (w === t || w === rev)) wi = i; });
+      clear();
+      if (wi < 0) { g.classList.remove('shake'); void g.offsetWidth; g.classList.add('shake'); U.sfx.bonk(); return; }
+      st.found[wi] = 1;
+      st.sel.push([a.r, a.c, b.r, b.c]);
+      lineCells(a, b).forEach(function (p) { cellEl(p[0], p[1]).classList.add('found', 'f' + (wi % 6)); });
+      $('.ws-words li[data-w="' + wi + '"]', box).classList.add('done');
+      $('#wscount').textContent = Object.keys(st.found).length;
+      U.sfx.correct();
+      if (Object.keys(st.found).length === words.length) setTimeout(function () { lock(st.get()); }, 500);
+    }
+    var start = null, dragging = false, cur = null;
+    g.addEventListener('pointerdown', function (e) {
+      if (S.locked) return;
+      var c = at(e.clientX, e.clientY);
+      if (!c) return;
+      e.preventDefault();
+      if (start && !dragging) { attempt(start, c); start = null; return; }
+      start = c; cur = c; dragging = true;
+      preview(start);
+      try { g.setPointerCapture(e.pointerId); } catch (err) { /* abaikan */ }
+    });
+    g.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      var c = at(e.clientX, e.clientY);
+      if (c) { cur = c; preview(start, c); }
+    });
+    g.addEventListener('pointerup', function () {
+      if (!dragging) return;
+      dragging = false;
+      if (cur && (cur.r !== start.r || cur.c !== start.c)) { attempt(start, cur); start = null; }
+      cur = null;
+    });
+    $('#wsdone').onclick = function () { if (!S.locked) lock(st.get()); };
+    st.reveal = function () {
+      words.forEach(function (w, i) {
+        if (st.found[i]) return;
+        wordCells(grid, w).forEach(function (p) { cellEl(p[0], p[1]).classList.add('missed'); });
+      });
+    };
+  }
+
+  /* ---------- Balon Meletus ---------- */
+  function renderBalloon(q, box) {
+    var st = S.st;
+    var opts = q.type === 'tf' ? [{ t: 'BENAR', v: true }, { t: 'SALAH', v: false }]
+      : q.options.map(function (o, i) { return { t: o, v: i }; });
+    box.innerHTML = '<div class="sky" id="sky">' + opts.map(function (o, k) {
+      return '<button type="button" class="balloon b' + (k % 6) + (String(o.t).length > 22 || String(o.t).split(/\s+/).some(function (w) { return w.length > 9; }) ? ' long' : '') + '" data-k="' + k + '"' +
+        (q.type === 'mcq' ? ' data-i="' + k + '"' : '') + '><span class="btext">' + esc(o.t) + '</span></button>';
+    }).join('') + '</div>';
+    var sky = $('#sky'), els = $$('.balloon', sky);
+    var H = sky.clientHeight || 360, W = sky.clientWidth || 320;
+    var bs = els.map(function (el, k) {
+      return {
+        el: el, x: (k + 0.5) / opts.length, y: H * (0.2 + 0.7 * ((k * 0.618) % 1)),
+        sp: (H / (6 + Math.random() * 2.5)), ph: Math.random() * 6.28, amp: 10 + Math.random() * 12
+      };
+    });
+    var last = performance.now(), raf = 0, alive = true;
+    function frame(t) {
+      if (!alive) return;
+      var dt = Math.min(0.05, (t - last) / 1000); last = t;
+      H = sky.clientHeight || H; W = sky.clientWidth || W;
+      bs.forEach(function (b) {
+        if (b.el.classList.contains('gone')) return;
+        b.y -= b.sp * dt;
+        if (b.y < -b.el.offsetHeight - 30) b.y = H + 10 + Math.random() * 60;
+        var bw = b.el.offsetWidth;
+        var x = Math.max(0, Math.min(W - bw, b.x * W - bw / 2 + Math.sin(t / 700 + b.ph) * b.amp));
+        b.el.style.transform = 'translate(' + x + 'px,' + b.y + 'px) rotate(' + Math.sin(t / 900 + b.ph) * 6 + 'deg)';
+      });
+      raf = requestAnimationFrame(frame);
+    }
+    raf = requestAnimationFrame(frame);
+    onQEnd(function () { alive = false; cancelAnimationFrame(raf); });
+    box.onclick = function (e) {
+      var el = e.target.closest('.balloon');
+      if (!el || S.locked || el.disabled) return;
+      el.classList.add('popped');
+      U.sfx.pop();
+      lock(opts[Number(el.dataset.k)].v);
+    };
+    st.reveal = function (a) {
+      els.forEach(function (el, k) {
+        var v = opts[k].v;
+        if (v === q.ans) el.classList.add('right'); else if (v === a) el.classList.add('wrong'); else el.classList.add('dim');
+      });
+    };
+  }
+
+  /* ---------- Kartu Memori ---------- */
+  function renderMemory(q, box) {
+    var st = S.st, n = q.left.length;
+    st.found = q.left.map(function () { return null; });
+    st.get = function () { return st.found.slice(); };
+    var cards = [];
+    q.left.forEach(function (t, i) { cards.push({ t: t, pair: i, side: 'L' }); });
+    q.right.forEach(function (t, j) { cards.push({ t: t, pair: q.ans.indexOf(j), side: 'R', j: j }); });
+    cards = Logic.shuffle(cards);
+    var open = [], moves = 0, busy = false;
+    box.innerHTML = '<div class="memory n' + cards.length + '">' + cards.map(function (c, k) {
+      return '<button type="button" class="mcard side-' + c.side + '" data-c="' + k + '"><span class="face back">?</span>' +
+        '<span class="face front">' + esc(c.t) + '</span></button>';
+    }).join('') + '</div><p class="hint">Langkah: <b id="mmoves">0</b> · Pasangan: <b id="mpairs">0</b>/' + n + '</p>';
+    var els = $$('.mcard', box);
+    box.onclick = function (e) {
+      var el = e.target.closest('.mcard');
+      if (!el || S.locked || busy || el.classList.contains('flip')) return;
+      var k = Number(el.dataset.c);
+      el.classList.add('flip');
+      U.sfx.flip();
+      open.push(k);
+      if (open.length < 2) return;
+      moves++;
+      $('#mmoves').textContent = moves;
+      var a = cards[open[0]], b = cards[open[1]];
+      if (a.pair === b.pair && a.side !== b.side) {
+        var r = a.side === 'R' ? a : b;
+        st.found[a.pair] = r.j;
+        open.forEach(function (x) { els[x].classList.add('matched', 'p' + (a.pair % 8)); });
+        open = [];
+        var cnt = st.found.filter(function (v) { return v !== null; }).length;
+        $('#mpairs').textContent = cnt;
+        U.sfx.correct();
+        if (cnt === n) setTimeout(function () { lock(st.get()); }, 600);
+      } else {
+        busy = true;
+        var pairOpen = open.slice();
+        open = [];
+        setTimeout(function () {
+          pairOpen.forEach(function (x) { els[x].classList.remove('flip'); });
+          busy = false;
+        }, 850);
+      }
+    };
+    st.reveal = function () {
+      els.forEach(function (el) { if (!el.classList.contains('matched')) el.classList.add('flip', 'dim'); });
+    };
+  }
+
+  /* ---------- Pukul Tikus ---------- */
+  function renderWhack(q, box) {
+    var st = S.st;
+    st.hits = [];
+    st.get = function () { return st.hits.slice(); };
+    var HOLES = 9;
+    box.innerHTML = '<div class="whack">' + range(HOLES).map(function (h) {
+      return '<div class="hole" data-h="' + h + '"><button type="button" class="mole"><span class="mface">🐹</span><span class="mlabel"></span></button><div class="dirt"></div></div>';
+    }).join('') + '</div><div class="row center gap wrap"><span class="hint">Kena: <b id="whits">0</b>' +
+      (q.ans !== undefined ? ' · Benar: <b id="wgood">0</b>/' + q.ans.filter(Boolean).length : '') + '</span>' +
+      '<button type="button" class="btn ghost" id="wdone">Selesai ✔</button></div>';
+    var holes = $$('.hole', box);
+    var state = holes.map(function () { return null; }); // item yang sedang muncul
+    var queue = [], timers = [], alive = true, spawnIv;
+    function nextItem() {
+      if (!queue.length) queue = Logic.shuffle(range(q.items.length));
+      return queue.shift();
+    }
+    function spawn() {
+      if (!alive || S.locked) return;
+      var free = range(HOLES).filter(function (h) { return state[h] === null; });
+      if (!free.length) return;
+      var h = free[Math.floor(Math.random() * free.length)], item = nextItem();
+      state[h] = item;
+      var hole = holes[h];
+      hole.querySelector('.mlabel').textContent = q.items[item];
+      hole.classList.remove('hit', 'good', 'bad');
+      hole.classList.add('up');
+      timers.push(setTimeout(function () { if (state[h] === item) { hole.classList.remove('up'); state[h] = null; } }, 1500 + Math.random() * 500));
+    }
+    spawn();
+    spawnIv = setInterval(spawn, 750);
+    onQEnd(function () { alive = false; clearInterval(spawnIv); timers.forEach(clearTimeout); });
+    box.onpointerdown = function (e) {
+      var m = e.target.closest('.mole');
+      if (!m || S.locked) return;
+      var hole = m.parentNode, h = Number(hole.dataset.h), item = state[h];
+      if (item === null || !hole.classList.contains('up')) return;
+      e.preventDefault();
+      state[h] = null;
+      hole.classList.add('hit');
+      if (st.hits.indexOf(item) < 0) st.hits.push(item);
+      $('#whits').textContent = st.hits.length;
+      if (q.ans !== undefined) {
+        var ok = q.ans[item];
+        hole.classList.add(ok ? 'good' : 'bad');
+        if (ok) U.sfx.correct(); else U.sfx.wrong();
+        var good = st.hits.filter(function (i) { return q.ans[i]; }).length;
+        $('#wgood').textContent = good;
+        if (good === q.ans.filter(Boolean).length) setTimeout(function () { lock(st.get()); }, 500);
+      } else U.sfx.bonk();
+      timers.push(setTimeout(function () { hole.classList.remove('up'); }, 350));
+    };
+    $('#wdone').onclick = function () { if (!S.locked) lock(st.get()); };
+    st.reveal = function (a) {
+      var missed = q.items.filter(function (t, i) { return q.ans[i] && (a || []).indexOf(i) < 0; });
+      var wrong = q.items.filter(function (t, i) { return !q.ans[i] && (a || []).indexOf(i) >= 0; });
+      box.insertAdjacentHTML('beforeend', '<div class="answer-key">' +
+        (missed.length ? '<div>Terlewat: <b>' + missed.map(esc).join(', ') + '</b></div>' : '<div>Semua jawaban benar sudah kamu pukul! 🎯</div>') +
+        (wrong.length ? '<div>Salah pukul: <b>' + wrong.map(esc).join(', ') + '</b></div>' : '') + '</div>');
+    };
+  }
+
+  /* ---------- Roda Putar ---------- */
+  function wrapHud() {
+    return hudHtml();
+  }
+
+  function showWheel() {
+    qEnd();
+    clearInterval(timer);
+    var n = S.served.length, seg = 360 / n, R = 140, C = 150;
+    var left = range(n).filter(function (i) { return S.done.indexOf(i) < 0; });
+    var colors = ['#f43f5e', '#3b82f6', '#f59e0b', '#22c55e', '#a855f7', '#06b6d4', '#ec4899', '#84cc16'];
+    function pt(a, r) { var rad = a * Math.PI / 180; return [C + r * Math.sin(rad), C - r * Math.cos(rad)]; }
+    var paths = range(n).map(function (i) {
+      var a0 = i * seg, a1 = (i + 1) * seg, p0 = pt(a0, R), p1 = pt(a1, R), mid = pt(a0 + seg / 2, R * 0.72);
+      var done = S.done.indexOf(i) >= 0;
+      var d = n === 1 ? 'M' + C + ' ' + (C - R) + ' A' + R + ' ' + R + ' 0 1 1 ' + (C - 0.01) + ' ' + (C - R) + 'Z'
+        : 'M' + C + ' ' + C + ' L' + p0[0] + ' ' + p0[1] + ' A' + R + ' ' + R + ' 0 ' + (seg > 180 ? 1 : 0) + ' 1 ' + p1[0] + ' ' + p1[1] + 'Z';
+      return '<path d="' + d + '" fill="' + (done ? '#64748b' : colors[i % colors.length]) + '" stroke="#fff" stroke-width="2"/>' +
+        '<text x="' + mid[0] + '" y="' + mid[1] + '" text-anchor="middle" dominant-baseline="middle" class="wl" transform="rotate(' + (a0 + seg / 2) + ' ' + mid[0] + ' ' + mid[1] + ')">' +
+        (done ? '✓' : (i + 1)) + '</text>';
+    }).join('');
+    S.wheelRot = S.wheelRot || 0;
+    root().innerHTML = themed(S.game.theme, '<div class="play mode-wheel">' + wrapHud() +
+      '<div class="wrap-title"><h2>🎡 Putar roda!</h2><p class="muted">Roda akan memilih soal berikutnya secara acak. Sisa ' + left.length + ' soal.</p></div>' +
+      '<div class="wheel-wrap"><div class="wheel-pin">▼</div><svg class="wheel" id="wheel" viewBox="0 0 300 300" style="transform:rotate(' + S.wheelRot + 'deg)">' +
+      '<circle cx="150" cy="150" r="146" fill="#1e1b4b"/>' + paths + '<circle cx="150" cy="150" r="22" fill="#fff" stroke="#1e1b4b" stroke-width="4"/></svg></div>' +
+      '<div class="row center"><button class="btn big glow" id="spin">🎡 PUTAR!</button></div><div class="fx" id="fx"></div></div>', 'playing');
+    bindMute(root());
+    $('#spin').onclick = function () {
+      var btn = this;
+      btn.disabled = true;
+      var target = left[Math.floor(Math.random() * left.length)];
+      var theta = target * seg + seg / 2 + (Math.random() - 0.5) * seg * 0.5;
+      var base = ((-theta - S.wheelRot) % 360 + 360) % 360;
+      var rot = S.wheelRot + 360 * 5 + base;
+      var w = $('#wheel');
+      w.style.transition = 'transform 4s cubic-bezier(.17,.67,.12,1)';
+      w.style.transform = 'rotate(' + rot + 'deg)';
+      var ticks = 0, tickIv = setInterval(function () { if (ticks++ < 30) U.sfx.spin(); else clearInterval(tickIv); }, 120);
+      onQEnd(function () { clearInterval(tickIv); });
+      setTimeout(function () {
+        if (!S || !S.active) return;
+        S.wheelRot = rot % 360;
+        S.idx = target;
+        persist();
+        U.sfx.go();
+        fx('<div class="fx-big">Soal nomor ' + (target + 1) + '!</div>');
+        setTimeout(function () { if (S && S.active) renderQuestion(); }, 900);
+      }, 4200);
+    };
+  }
+
+  /* ---------- Kotak Misteri ---------- */
+  function showBoxes() {
+    qEnd();
+    clearInterval(timer);
+    var n = S.served.length;
+    root().innerHTML = themed(S.game.theme, '<div class="play mode-box">' + wrapHud() +
+      '<div class="wrap-title"><h2>🎁 Pilih kotak misteri!</h2><p class="muted">Setiap kotak berisi satu tantangan. Buka semuanya!</p></div>' +
+      '<div class="boxes">' + range(n).map(function (i) {
+        var done = S.done.indexOf(i) >= 0, f = S.fracs[i];
+        var mark = !done ? '' : f === undefined ? '🔒' : f >= 0.999 ? '✅' : f > 0 ? '🌗' : '❌';
+        return '<button type="button" class="mbox c' + (i % 6) + (done ? ' opened' : '') + '" data-i="' + i + '" ' + (done ? 'disabled' : '') + '>' +
+          '<span class="lid"></span><span class="bnum">' + (done ? mark : (i + 1)) + '</span></button>';
+      }).join('') + '</div></div>', 'playing');
+    bindMute(root());
+    $$('.mbox:not(.opened)').forEach(function (b) {
+      b.onclick = function () {
+        $$('.mbox').forEach(function (x) { x.disabled = true; });
+        b.classList.add('opening');
+        U.sfx.combo();
+        setTimeout(function () {
+          if (!S || !S.active) return;
+          S.idx = Number(b.dataset.i);
+          persist();
+          renderQuestion();
+        }, 650);
+      };
+    });
+  }
+
   function fx(html, cls) {
     var el = $('#fx');
     if (!el) return;
@@ -493,6 +1120,7 @@ var Student = (function () {
     if (S.locked) return;
     S.locked = true;
     clearInterval(timer);
+    qEnd();
     var q = S.served[S.idx];
     S.answers[S.idx] = answer;
     var limit = S.timeLimit + S.extra;
@@ -502,6 +1130,7 @@ var Student = (function () {
     var delay = 900;
     if (q.ans !== undefined) {
       var frac = Logic.gradeDisplay(q.type, q.ans, answer);
+      S.fracs[S.idx] = frac;
       var full = frac >= 0.999;
       S.combo = full ? S.combo + 1 : 0;
       S.maxCombo = Math.max(S.maxCombo, S.combo);
@@ -520,7 +1149,8 @@ var Student = (function () {
         delay = 2600;
       } else {
         U.sfx.wrong();
-        root().querySelector('.qcard').classList.add('shake');
+        var qc = root().querySelector('.qcard');
+        if (qc) qc.classList.add('shake');
         fx('<div class="fx-big bad">' + (answer === null ? '⏰ Waktu habis!' : pick(['Belum tepat 😅', 'Ups, salah! 🙈', 'Coba lagi nanti 💪'])) + '</div>', 'bad');
         delay = 2600;
       }
@@ -532,11 +1162,12 @@ var Student = (function () {
     }
     var xpEl = $('#xp'); if (xpEl) xpEl.textContent = S.xp;
     var cEl = $('#combo'); if (cEl) { cEl.textContent = '🔥 x' + S.combo; cEl.classList.toggle('on', S.combo >= 2); }
-    S.idx++;
+    if (S.done.indexOf(S.idx) < 0) S.done.push(S.idx);
+    if (!NONSEQ[gmode()]) S.idx++;
     persist();
     setTimeout(function () {
       if (!S || !S.active) return;
-      if (S.idx >= S.served.length) finish(); else renderQuestion();
+      proceed();
     }, delay);
   }
 
@@ -544,6 +1175,7 @@ var Student = (function () {
 
   function reveal(q, a) {
     var box = $('#answers');
+    if (S.st && S.st.reveal) { S.st.reveal(a); return; }
     if (q.type === 'mcq') {
       $$('.opt', box).forEach(function (b) {
         var i = Number(b.dataset.i);

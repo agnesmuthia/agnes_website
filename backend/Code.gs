@@ -60,6 +60,7 @@ function cekPengaturan() {
   var key = SheetsDB.teacherKey();
   console.log(key ? 'TEACHER_KEY sudah diatur (' + key.length + ' karakter).' : 'PERINGATAN: TEACHER_KEY belum diatur di Script Properties.');
   console.log('Versi backend: ' + Core.VERSION);
+  console.log('Pemilik (selalu boleh masuk dengan Gmail): ' + ownerEmail_());
   console.log('Zona waktu skrip: ' + Session.getScriptTimeZone());
   console.log('Folder Drive utama: ' + pathOf_(root_(true)));
   UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=x', { muteHttpExceptions: true });
@@ -118,6 +119,17 @@ function fromResult_(o) {
 
 /* ---------- Pengaturan & folder Drive ---------- */
 function props_() { return PropertiesService.getScriptProperties(); }
+
+var SESSION_TTL = 21600; // 6 jam, diperpanjang otomatis selama guru aktif
+
+function teacherEmails_() {
+  return String(props_().getProperty('TEACHER_EMAILS') || '').split(',')
+    .map(function (e) { return e.trim().toLowerCase(); }).filter(Boolean);
+}
+
+function ownerEmail_() {
+  try { return String(Session.getEffectiveUser().getEmail() || '').toLowerCase(); } catch (e) { return ''; }
+}
 
 function setProp_(key, val) {
   if (val === '' || val === null || val === undefined) props_().deleteProperty(key);
@@ -324,12 +336,14 @@ var SheetsDB = {
   getConfig: function () {
     var p = props_().getProperties();
     return {
+      teacherEmails: teacherEmails_(),
       googleClientId: p.GOOGLE_CLIENT_ID || '', driveRootId: p.DRIVE_ROOT_ID || '', schoolYear: p.SCHOOL_YEAR || '',
       autoSave: p.AUTO_SAVE === '1', autoSaveMode: p.AUTO_SAVE_MODE || 'perClass', lastAutoSave: p.LAST_AUTOSAVE || ''
     };
   },
   setConfig: function (c) {
     if ('googleClientId' in c) setProp_('GOOGLE_CLIENT_ID', c.googleClientId);
+    if ('teacherEmails' in c) setProp_('TEACHER_EMAILS', c.teacherEmails.join(','));
     if ('schoolYear' in c) setProp_('SCHOOL_YEAR', c.schoolYear);
     if ('autoSaveMode' in c) setProp_('AUTO_SAVE_MODE', c.autoSaveMode);
     if ('driveRootId' in c) {
@@ -352,6 +366,30 @@ var SheetsDB = {
       schoolYear: schoolYear_(), triggerActive: triggerActive_(), autoSaveHour: AUTO_SAVE_HOUR,
       timeZone: Session.getScriptTimeZone()
     };
+  },
+
+  /* ---------- Login Gmail guru (sesi) ---------- */
+  ownerEmail: function () { return ownerEmail_(); },
+  isTeacherEmail: function (email) {
+    email = String(email || '').toLowerCase();
+    if (!email) return false;
+    return email === ownerEmail_() || teacherEmails_().indexOf(email) >= 0;
+  },
+  createSession: function (email) {
+    var token = 'gs_' + Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+    CacheService.getScriptCache().put('sess_' + token, email, SESSION_TTL);
+    return token;
+  },
+  checkSession: function (token) {
+    var cache = CacheService.getScriptCache();
+    var email = cache.get('sess_' + token);
+    if (!email) return '';
+    if (!this.isTeacherEmail(email)) { cache.remove('sess_' + token); return ''; } // email sudah dihapus dari daftar
+    cache.put('sess_' + token, email, SESSION_TTL);
+    return email;
+  },
+  endSession: function (token) {
+    CacheService.getScriptCache().remove('sess_' + token);
   },
 
   /* ---------- Login Google siswa ---------- */
@@ -463,7 +501,7 @@ var SheetsDB = {
     var changed = {};
     all.forEach(function (r) {
       var t = String(r.finishedAt || r.startedAt || '');
-      if (!last || t > last) changed[r.code] = 1;
+      if (!last || t >= last) changed[r.code] = 1; // >= agar aktivitas pada milidetik yang sama tidak terlewat
     });
     var saved = [], errors = [], self = this;
     Object.keys(changed).forEach(function (code) {
@@ -487,13 +525,28 @@ var SheetsDB = {
  * (lihat tools/build-backend.sh), sehingga cara menilai selalu sama persis.
  *
  * Jenis soal:
- *   mcq   : { q, options:[...], answer:<index benar> }
- *   tf    : { q, answer:true|false }
- *   short : { q, answers:['jawaban', 'alternatif'] }
- *   match : { q, pairs:[[kiri, kanan], ...] }
- *   order : { q, items:[urutan benar...] }
+ *   mcq        : { q, options:[...], answer:<index benar> }
+ *   tf         : { q, answer:true|false }
+ *   short      : { q, answers:['jawaban', 'alternatif'] }
+ *   match      : { q, pairs:[[kiri, kanan], ...] }
+ *   order      : { q, items:[urutan benar...] }
+ *   group      : { q, groups:[{ name, items:[...] }, ...] }        (2–4 kelompok)
+ *   word       : { q:<petunjuk>, answer:'KATA' }                    (susun huruf / tebak kata)
+ *   cloze      : { q, text:'Ibu kota RI adalah [Jakarta].', extra:['Bandung'] }
+ *   multi      : { q, items:[[teks, benar?], ...] }                 (pilih semua yang benar / pukul tikus)
+ *   wordsearch : { q, words:['ATMOSFER', ...] }                     (cari kata)
+ *
+ * Jenis permainan (game.mode) hanya mengubah tampilan, kecuali mode yang
+ * memang membutuhkan kunci di perangkat siswa (lihat REVEAL).
  */
 var Logic = (function () {
+  var HANGMAN_LIVES = 6;
+  var TIME_FACTOR = { mcq: 1, tf: 1, short: 1.2, match: 1.5, order: 1.5, group: 2, word: 1.5, cloze: 2, multi: 1.5, wordsearch: 4 };
+  var MODE_FACTOR = { memory: { match: 2.5 }, hangman: { word: 2 }, whack: { multi: 1.3 } };
+  // Mode yang tidak bisa dimainkan tanpa kunci jawaban di perangkat siswa (mode latihan).
+  var REVEAL = { memory: ['match'], hangman: ['word'] };
+  var MODES = ['classic', 'balloon', 'whack', 'memory', 'hangman', 'anagram', 'group', 'cloze', 'wordsearch', 'wheel', 'box'];
+
   function shuffle(arr) {
     var a = arr.slice();
     for (var i = a.length - 1; i > 0; i--) {
@@ -521,25 +574,142 @@ var Logic = (function () {
     return String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' ').replace(/[.,!?;:"']+$/g, '');
   }
 
+  // Huruf & angka saja, huruf besar (untuk soal kata dan cari kata).
+  function letters(s) {
+    return String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  }
+
   function studentKey(st) {
     return norm(st.cls) + '|' + norm(st.sid || st.name);
   }
 
-  // Kunci jawaban dalam "urutan tampilan" (setelah opsi diacak).
-  function answerKey(q, perm) {
+  function mode(game) {
+    return MODES.indexOf(game && game.mode) >= 0 ? game.mode : 'classic';
+  }
+
+  function reveals(m, type) { return (REVEAL[m] || []).indexOf(type) >= 0; }
+
+  function timeFor(type, m, base) {
+    base = Number(base) || 0;
+    if (!base) return 0;
+    var f = (MODE_FACTOR[m] && MODE_FACTOR[m][type]) || TIME_FACTOR[type] || 1;
+    return Math.round(base * f);
+  }
+
+  function clozeParts(text) {
+    var parts = [], blanks = [], re = /\[([^\]]+)\]/g, last = 0, m;
+    text = String(text || '');
+    while ((m = re.exec(text))) {
+      parts.push(text.slice(last, m.index));
+      blanks.push(m[1].trim());
+      last = re.lastIndex;
+    }
+    parts.push(text.slice(last));
+    return { parts: parts, blanks: blanks };
+  }
+
+  function flatGroups(q) {
+    var flat = [];
+    (q.groups || []).forEach(function (g, gi) { (g.items || []).forEach(function (t) { flat.push({ t: t, g: gi }); }); });
+    return flat;
+  }
+
+  // Teka-teki cari kata: arah → ↓ ↘ ↗ (tidak terbalik, agar ramah siswa).
+  function makeWordsearch(words) {
+    words = words.map(letters).filter(Boolean);
+    var longest = Math.max.apply(null, words.map(function (w) { return w.length; }));
+    var total = words.reduce(function (s, w) { return s + w.length; }, 0);
+    var size = Math.min(15, Math.max(8, longest, Math.ceil(Math.sqrt(total * 2.2))));
+    var DIRS = [[0, 1], [1, 0], [1, 1], [-1, 1]];
+    var ABC = 'ABCDEFGHIJKLMNOPRSTUWY';
+    var order = range(words.length).sort(function (a, b) { return words[b].length - words[a].length; });
+    for (var attempt = 0; attempt < 60; attempt++) {
+      if (attempt && attempt % 15 === 0 && size < 16) size++;
+      var grid = [];
+      for (var r = 0; r < size; r++) { grid.push([]); for (var c = 0; c < size; c++) grid[r].push(''); }
+      var ok = order.every(function (wi) {
+        var w = words[wi];
+        for (var t = 0; t < 250; t++) {
+          var d = DIRS[Math.floor(Math.random() * DIRS.length)];
+          var r0 = Math.floor(Math.random() * size), c0 = Math.floor(Math.random() * size);
+          var r1 = r0 + d[0] * (w.length - 1), c1 = c0 + d[1] * (w.length - 1);
+          if (r1 < 0 || r1 >= size || c1 >= size) continue;
+          var fits = true;
+          for (var i = 0; i < w.length && fits; i++) {
+            var ch = grid[r0 + d[0] * i][c0 + d[1] * i];
+            if (ch && ch !== w[i]) fits = false;
+          }
+          if (!fits) continue;
+          for (var j = 0; j < w.length; j++) grid[r0 + d[0] * j][c0 + d[1] * j] = w[j];
+          return true;
+        }
+        return false;
+      });
+      if (!ok) continue;
+      return {
+        words: words,
+        grid: grid.map(function (row) {
+          return row.map(function (ch) { return ch || ABC.charAt(Math.floor(Math.random() * ABC.length)); }).join('');
+        })
+      };
+    }
+    throw new Error('Gagal menyusun teka-teki cari kata. Kurangi jumlah atau panjang kata.');
+  }
+
+  // Huruf di sepanjang garis lurus (mendatar, menurun, diagonal) pada kotak huruf.
+  function lineText(grid, r1, c1, r2, c2) {
+    r1 = Number(r1); c1 = Number(c1); r2 = Number(r2); c2 = Number(c2);
+    var dr = r2 - r1, dc = c2 - c1;
+    if (!(dr === 0 || dc === 0 || Math.abs(dr) === Math.abs(dc))) return '';
+    var n = Math.max(Math.abs(dr), Math.abs(dc)) + 1, sr = dr ? dr / Math.abs(dr) : 0, sc = dc ? dc / Math.abs(dc) : 0, out = '';
+    for (var i = 0; i < n; i++) {
+      var row = grid[r1 + sr * i];
+      if (row === undefined || c1 + sc * i < 0 || c1 + sc * i >= row.length) return '';
+      out += row.charAt(c1 + sc * i);
+    }
+    return out;
+  }
+
+  function hangmanScore(word, guesses) {
+    var target = letters(word).split('');
+    var uniq = target.filter(function (ch, i) { return target.indexOf(ch) === i; });
+    var revealed = {}, seen = {}, lives = HANGMAN_LIVES, found = 0;
+    for (var i = 0; i < guesses.length && lives > 0 && found < uniq.length; i++) {
+      var g = letters(guesses[i]).charAt(0);
+      if (!g || seen[g]) continue;
+      seen[g] = 1;
+      if (uniq.indexOf(g) >= 0) { revealed[g] = 1; found++; } else lives--;
+    }
+    if (!uniq.length) return 0;
+    return found === uniq.length ? 1 : Math.round(found / uniq.length * 50) / 100;
+  }
+
+  // Kunci jawaban dalam "urutan tampilan" (setelah opsi diacak). k = { perm, grid } dari kunci server.
+  function answerKey(q, k) {
+    var perm = k && k.perm;
     switch (q.type) {
       case 'mcq': return perm.indexOf(Number(q.answer));
       case 'tf': return q.answer === true || q.answer === 'true';
       case 'short': return (q.answers || []).slice();
       case 'match': return q.pairs.map(function (_, i) { return perm.indexOf(i); });
       case 'order': return q.items.map(function (_, i) { return perm.indexOf(i); });
+      case 'group':
+        var flat = flatGroups(q);
+        return perm.map(function (i) { return flat[i].g; });
+      case 'word': return String(q.answer || '').toUpperCase().trim();
+      case 'cloze':
+        var cz = clozeParts(q.text), bank = cz.blanks.concat(q.extra || []);
+        return { blanks: cz.blanks, bank: perm.map(function (i) { return bank[i]; }) };
+      case 'multi': return perm.map(function (i) { return !!q.items[i][1]; });
+      case 'wordsearch': return { grid: k.grid, words: (q.words || []).map(letters).filter(Boolean) };
     }
     return null;
   }
 
-  // Nilai satu soal: 0..1 (menjodohkan & mengurutkan bisa bernilai sebagian).
+  // Nilai satu soal: 0..1 (banyak jenis soal bisa bernilai sebagian).
   function gradeDisplay(type, ans, a) {
     if (a === null || a === undefined || a === '') return 0;
+    var i, c;
     switch (type) {
       case 'mcq': return Number(a) === Number(ans) ? 1 : 0;
       case 'tf': return (a === true || a === 'true') === (ans === true) ? 1 : 0;
@@ -548,10 +718,43 @@ var Logic = (function () {
         return ans.some(function (x) { return norm(x) === v; }) ? 1 : 0;
       case 'match':
       case 'order':
+      case 'group':
         if (!Array.isArray(a) || !ans.length) return 0;
-        var c = 0;
-        for (var i = 0; i < ans.length; i++) if (Number(a[i]) === ans[i]) c++;
+        c = 0;
+        for (i = 0; i < ans.length; i++) if (a[i] !== null && a[i] !== undefined && Number(a[i]) === ans[i]) c++;
         return c / ans.length;
+      case 'word':
+        if (Array.isArray(a)) return hangmanScore(ans, a); // tebak kata: daftar huruf yang ditebak
+        return letters(a) === letters(ans) ? 1 : 0;      // susun huruf: kata akhir
+      case 'cloze':
+        if (!Array.isArray(a) || !ans.blanks.length) return 0;
+        c = 0;
+        ans.blanks.forEach(function (w, b) {
+          var pick = a[b] === null || a[b] === undefined ? undefined : ans.bank[Number(a[b])];
+          if (pick !== undefined && norm(pick) === norm(w)) c++;
+        });
+        return c / ans.blanks.length;
+      case 'multi':
+        if (!Array.isArray(a)) return 0;
+        var pos = ans.filter(Boolean).length, tp = 0, fp = 0, seen = {};
+        if (!pos) return 0;
+        a.forEach(function (x) {
+          x = Number(x);
+          if (seen[x] || !(x >= 0 && x < ans.length)) return;
+          seen[x] = 1;
+          if (ans[x]) tp++; else fp++;
+        });
+        return Math.max(0, tp - fp) / pos;
+      case 'wordsearch':
+        if (!Array.isArray(a) || !ans.words.length) return 0;
+        var found = {};
+        a.forEach(function (sel) {
+          if (!Array.isArray(sel) || sel.length !== 4) return;
+          var t = lineText(ans.grid, sel[0], sel[1], sel[2], sel[3]);
+          var rev = t.split('').reverse().join('');
+          ans.words.forEach(function (w, wi) { if (t && (t === w || rev === w)) found[wi] = 1; });
+        });
+        return Object.keys(found).length / ans.words.length;
     }
     return 0;
   }
@@ -560,6 +763,7 @@ var Logic = (function () {
   // served = yang dikirim ke siswa, key = rahasia yang disimpan di server.
   function buildAttempt(game) {
     var s = game.settings || {};
+    var m = mode(game);
     var qs = (game.questions || []).slice();
     if (s.shuffleQuestions) qs = shuffle(qs);
     var n = Number(s.questionCount) || 0;
@@ -567,22 +771,46 @@ var Logic = (function () {
 
     var key = [], served = [];
     qs.forEach(function (q) {
-      var perm = null;
-      var item = { id: q.id, type: q.type, q: q.q, img: q.img || '' };
+      var k = { id: q.id, perm: null };
+      var item = { id: q.id, type: q.type, q: q.q, img: q.img || '', time: timeFor(q.type, m, s.timePerQuestion) };
       if (q.type === 'mcq') {
-        perm = s.shuffleOptions ? shuffle(range(q.options.length)) : range(q.options.length);
-        item.options = perm.map(function (i) { return q.options[i]; });
+        k.perm = s.shuffleOptions ? shuffle(range(q.options.length)) : range(q.options.length);
+        item.options = k.perm.map(function (i) { return q.options[i]; });
       } else if (q.type === 'match') {
-        perm = derange(q.pairs.length);
+        k.perm = derange(q.pairs.length);
         item.left = q.pairs.map(function (p) { return p[0]; });
-        item.right = perm.map(function (i) { return q.pairs[i][1]; });
+        item.right = k.perm.map(function (i) { return q.pairs[i][1]; });
       } else if (q.type === 'order') {
-        perm = derange(q.items.length);
-        item.items = perm.map(function (i) { return q.items[i]; });
+        k.perm = derange(q.items.length);
+        item.items = k.perm.map(function (i) { return q.items[i]; });
+      } else if (q.type === 'group') {
+        var flat = flatGroups(q);
+        k.perm = shuffle(range(flat.length));
+        item.groups = q.groups.map(function (g) { return g.name; });
+        item.items = k.perm.map(function (i) { return flat[i].t; });
+      } else if (q.type === 'word') {
+        var w = String(q.answer || '').toUpperCase().trim();
+        var tiles = letters(w).split(''), mixed = tiles;
+        for (var t = 0; t < 8 && mixed.join('') === tiles.join('') && tiles.length > 1; t++) mixed = shuffle(tiles);
+        item.tiles = mixed;
+        item.pattern = w.split(/\s+/).map(function (x) { return letters(x).length; }).filter(Boolean);
+      } else if (q.type === 'cloze') {
+        var cz = clozeParts(q.text), bank = cz.blanks.concat(q.extra || []);
+        k.perm = shuffle(range(bank.length));
+        item.parts = cz.parts;
+        item.bank = k.perm.map(function (i) { return bank[i]; });
+      } else if (q.type === 'multi') {
+        k.perm = shuffle(range(q.items.length));
+        item.items = k.perm.map(function (i) { return q.items[i][0]; });
+      } else if (q.type === 'wordsearch') {
+        var ws = makeWordsearch(q.words || []);
+        k.grid = ws.grid;
+        item.grid = ws.grid;
+        item.words = ws.words;
       }
-      key.push({ id: q.id, perm: perm });
-      // Kunci jawaban hanya dikirim bila guru mengaktifkan umpan balik langsung.
-      if (s.showFeedback) item.ans = answerKey(q, perm);
+      key.push(k);
+      // Kunci jawaban dikirim hanya bila umpan balik aktif, atau mode latihan yang membutuhkannya.
+      if (s.showFeedback || reveals(m, q.type)) item.ans = answerKey(q, k);
       served.push(item);
     });
     return { served: served, key: key };
@@ -596,7 +824,7 @@ var Logic = (function () {
     key.forEach(function (k, i) {
       var q = byId[k.id];
       if (!q) return;
-      var f = gradeDisplay(q.type, answerKey(q, k.perm), answers ? answers[i] : null);
+      var f = gradeDisplay(q.type, answerKey(q, k), answers ? answers[i] : null);
       detail[k.id] = Math.round(f * 100) / 100;
       sum += f;
       if (f >= 0.999) correct++;
@@ -648,8 +876,10 @@ var Logic = (function () {
   }
 
   return {
-    shuffle: shuffle, norm: norm, studentKey: studentKey, answerKey: answerKey,
-    gradeDisplay: gradeDisplay, buildAttempt: buildAttempt, grade: grade, counted: counted, rank: rank
+    shuffle: shuffle, norm: norm, letters: letters, studentKey: studentKey, answerKey: answerKey,
+    gradeDisplay: gradeDisplay, buildAttempt: buildAttempt, grade: grade, counted: counted, rank: rank,
+    mode: mode, reveals: reveals, timeFor: timeFor, clozeParts: clozeParts, makeWordsearch: makeWordsearch,
+    lineText: lineText, hangmanScore: hangmanScore, HANGMAN_LIVES: HANGMAN_LIVES, MODES: MODES
   };
 })();
 
@@ -659,7 +889,7 @@ var Logic = (function () {
  * backend/Code.gs untuk Google Sheets, dengan objek `db` yang berbeda.
  */
 var Core = (function () {
-  var VERSION = 2; // naikkan setiap kali backend (Code.gs) berubah
+  var VERSION = 3; // naikkan setiap kali backend (Code.gs) berubah
   var TEACHER_ACTIONS = ['listGames', 'saveGame', 'deleteGame', 'results', 'resetAttempts', 'exportDrive',
     'getConfig', 'saveConfig', 'driveFolders', 'driveCreateFolder', 'driveHistory', 'runAutoSave'];
   var NO_DRIVE = 'Fitur Google Drive hanya tersedia jika aplikasi terhubung ke Google Sheets (menu Pengaturan).';
@@ -722,7 +952,7 @@ var Core = (function () {
     var google = s.loginMode === 'google';
     return {
       code: g.code, title: g.title, subject: g.subject, cls: g.cls || '', description: g.description || '',
-      theme: g.theme || 'galaxy', questionCount: questionTotal(g),
+      theme: g.theme || 'galaxy', mode: Logic.mode(g), questionCount: questionTotal(g),
       settings: {
         timePerQuestion: Number(s.timePerQuestion) || 0, maxAttempts: Number(s.maxAttempts) || 0,
         showFeedback: !!s.showFeedback, showLeaderboard: !!s.showLeaderboard, powerUps: !!s.powerUps,
@@ -749,10 +979,13 @@ var Core = (function () {
 
   function validateGame(g) {
     if (!g || !String(g.title || '').trim()) fail('Judul game wajib diisi.');
+    g.mode = Logic.mode(g);
     if (!g.questions || !g.questions.length) fail('Tambahkan minimal 1 soal.');
     g.questions.forEach(function (q, i) {
       var n = 'Soal ' + (i + 1) + ': ';
       if (!q.id) q.id = uid();
+      var DEFAULT_Q = { cloze: 'Lengkapi kalimat berikut.', wordsearch: 'Temukan kata-kata berikut.', group: 'Kelompokkan item berikut.' };
+      if (!String(q.q || '').trim() && DEFAULT_Q[q.type]) q.q = DEFAULT_Q[q.type];
       if (!String(q.q || '').trim()) fail(n + 'pertanyaan masih kosong.');
       if (q.type === 'mcq') {
         q.options = (q.options || []).map(String).filter(function (o) { return o.trim(); });
@@ -770,6 +1003,39 @@ var Core = (function () {
       } else if (q.type === 'order') {
         q.items = (q.items || []).map(String).filter(function (o) { return o.trim(); });
         if (q.items.length < 2) fail(n + 'minimal 2 item untuk diurutkan.');
+      } else if (q.type === 'group') {
+        q.groups = (q.groups || []).map(function (gr) {
+          return {
+            name: String(gr.name || '').trim(),
+            items: (gr.items || []).map(function (t) { return String(t).trim(); }).filter(Boolean)
+          };
+        }).filter(function (gr) { return gr.name && gr.items.length; });
+        if (q.groups.length < 2) fail(n + 'minimal 2 kelompok, masing-masing berisi item.');
+        if (q.groups.length > 4) fail(n + 'maksimal 4 kelompok.');
+      } else if (q.type === 'word') {
+        q.answer = String(q.answer || '').trim().toUpperCase();
+        var wl = Logic.letters(q.answer).length;
+        if (wl < 2) fail(n + 'kata jawaban minimal 2 huruf.');
+        if (wl > 20) fail(n + 'kata jawaban maksimal 20 huruf.');
+      } else if (q.type === 'cloze') {
+        q.text = String(q.text || '').trim();
+        if (!Logic.clozeParts(q.text).blanks.length) fail(n + 'tandai kata yang dikosongkan dengan kurung siku, cth. [Jakarta].');
+        q.extra = (q.extra || []).map(function (t) { return String(t).trim(); }).filter(Boolean);
+      } else if (q.type === 'multi') {
+        q.items = (q.items || []).map(function (it) { return [String(it[0] || '').trim(), !!it[1]]; })
+          .filter(function (it) { return it[0]; });
+        if (q.items.length < 3) fail(n + 'minimal 3 pilihan.');
+        if (!q.items.some(function (it) { return it[1]; })) fail(n + 'tandai minimal 1 jawaban benar.');
+      } else if (q.type === 'wordsearch') {
+        q.words = (q.words || []).map(function (w) { return String(w).trim().toUpperCase(); })
+          .filter(function (w) { return Logic.letters(w).length; });
+        if (q.words.length < 2) fail(n + 'minimal 2 kata untuk dicari.');
+        if (q.words.length > 12) fail(n + 'maksimal 12 kata.');
+        q.words.forEach(function (w) {
+          var l = Logic.letters(w).length;
+          if (l < 3 || l > 14) fail(n + 'kata "' + w + '" harus 3–14 huruf.');
+        });
+        Logic.makeWordsearch(q.words);
       } else {
         fail(n + 'jenis soal tidak dikenal.');
       }
@@ -785,13 +1051,18 @@ var Core = (function () {
   }
 
   // Penanda (bukan penolakan) agar jawaban siswa tidak hilang, tetapi guru tahu.
-  function lateFlags(r, s) {
+  function lateFlags(r, g) {
+    var s = g.settings || {};
     var flags = [];
     var fin = Date.parse(r.finishedAt);
     if (s.closeAt && fin > Date.parse(s.closeAt) + 120000) flags.push('Dikirim setelah game ditutup');
     var tpq = Number(s.timePerQuestion) || 0;
     if (tpq > 0) {
-      var limit = Number(r.total) * (tpq + 4) + (s.powerUps ? 15 : 0) + 120;
+      var m = Logic.mode(g), types = {};
+      (g.questions || []).forEach(function (q) { types[q.id] = q.type; });
+      var perQ = m === 'wheel' || m === 'box' ? 12 : 5; // waktu animasi/umpan balik per soal
+      var limit = (s.powerUps ? 15 : 0) + 120;
+      (r.servedKey || []).forEach(function (k) { limit += Logic.timeFor(types[k.id] || 'mcq', m, tpq) + perQ; });
       if (Number(r.durationSec) > limit) flags.push('Melebihi batas waktu pengerjaan');
     }
     return flags.join('; ');
@@ -815,6 +1086,12 @@ var Core = (function () {
     if ('driveRootId' in c) out.driveRootId = String(c.driveRootId || '').trim();
     if ('autoSave' in c) out.autoSave = !!c.autoSave;
     if ('autoSaveMode' in c) out.autoSaveMode = c.autoSaveMode === 'combined' ? 'combined' : 'perClass';
+    if ('teacherEmails' in c) {
+      var list = (Array.isArray(c.teacherEmails) ? c.teacherEmails : String(c.teacherEmails || '').split(/[,;\s]+/))
+        .map(function (e) { return String(e).trim().toLowerCase(); }).filter(Boolean);
+      list.forEach(function (e) { if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) fail('Email guru tidak valid: ' + e); });
+      out.teacherEmails = list.filter(function (e, i) { return list.indexOf(e) === i; }).slice(0, 50);
+    }
     return out;
   }
 
@@ -832,12 +1109,31 @@ var Core = (function () {
     req = req || {};
     var action = req.action;
     var tkey = db.teacherKey();
-    var isTeacher = !!tkey && !!req.auth && sameKey(req.auth, tkey);
+    var auth = String(req.auth || '');
+    var isTeacher = (!!tkey && !!auth && sameKey(auth, tkey)) ||
+      (auth.indexOf('gs_') === 0 && !!db.checkSession && !!db.checkSession(auth));
     if (TEACHER_ACTIONS.indexOf(action) >= 0 && !isTeacher) fail('Kata sandi guru salah.');
 
     switch (action) {
       case 'ping':
-        return { mode: db.mode, teacher: isTeacher, configured: !!tkey, version: VERSION, googleLogin: !!config(db).googleClientId };
+        var cfgP = config(db);
+        return {
+          mode: db.mode, teacher: isTeacher, configured: !!tkey, version: VERSION,
+          googleLogin: !!cfgP.googleClientId, googleClientId: cfgP.googleClientId || ''
+        };
+
+      case 'teacherGoogle': {
+        if (!db.verifyGoogleToken || !db.createSession) fail('Login Gmail guru hanya tersedia jika aplikasi terhubung ke Google Sheets.');
+        var who = db.verifyGoogleToken(String(req.idToken || ''));
+        if (!db.isTeacherEmail(who.email)) {
+          fail('Email ' + who.email + ' belum terdaftar sebagai guru. Masuk dengan kata sandi, lalu tambahkan email ini di menu Pengaturan.');
+        }
+        return { session: db.createSession(who.email), email: who.email, name: who.name };
+      }
+
+      case 'logout':
+        if (auth.indexOf('gs_') === 0 && db.endSession) db.endSession(auth);
+        return {};
 
       case 'getGame': {
         var g = needGame(db, req.code);
@@ -901,7 +1197,7 @@ var Core = (function () {
           r.xp = Math.max(0, Math.min(999999, Number(req.xp) || 0));
           r.finishedAt = nowIso();
           r.durationSec = Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt)) / 1000);
-          r.flags = lateFlags(r, g2.settings || {});
+          r.flags = lateFlags(r, g2);
           db.updateResult(r);
         }
         var s2 = g2.settings || {};
@@ -992,12 +1288,13 @@ var Core = (function () {
       }
 
       case 'getConfig':
-        return { config: config(db), drive: db.driveInfo ? db.driveInfo() : null };
+        return { config: config(db), drive: db.driveInfo ? db.driveInfo() : null, owner: db.ownerEmail ? db.ownerEmail() : '',
+          me: auth.indexOf('gs_') === 0 && db.checkSession ? db.checkSession(auth) : '' };
 
       case 'saveConfig': {
         if (!db.setConfig) fail(NO_DRIVE);
         db.setConfig(cleanConfig(req.config));
-        return { config: config(db), drive: db.driveInfo ? db.driveInfo() : null };
+        return { config: config(db), drive: db.driveInfo ? db.driveInfo() : null, owner: db.ownerEmail ? db.ownerEmail() : '' };
       }
 
       case 'driveFolders':

@@ -86,7 +86,7 @@ var Api = (function () {
   }
 
   // Versi backend (Code.gs) yang dibutuhkan aplikasi ini. Sama dengan Core.VERSION.
-  var REQUIRED_BACKEND = 2;
+  var REQUIRED_BACKEND = 3;
   function backendVersion() { return Number(sessionStorage.getItem('gb_bver')) || 0; }
   function setBackendInfo(r) {
     sessionStorage.setItem('gb_bver', String(r.version || 1));

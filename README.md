@@ -3,6 +3,25 @@
 Aplikasi web untuk membuat **game pembelajaran interaktif** bagi siswa SMA. Aplikasi ini dilengkapi rekap nilai 0–100,
 papan skor ratusan siswa, analisis data dengan diagram, dan penyimpanan rekap ke **Google Drive**.
 
+## 🎮 11 jenis permainan (terinspirasi Wordwall)
+
+| Jenis | Cara main | Jenis soal |
+|---|---|---|
+| 📝 Kuis Klasik | Kuis cepat ala gameshow dengan timer, combo, power-up | semua jenis |
+| 🎈 Balon Meletus | Jawaban melayang sebagai balon; letuskan yang benar | pilihan ganda, benar/salah |
+| 🔨 Pukul Tikus | Tikus muncul membawa jawaban; pukul hanya yang benar | pilih semua yang benar |
+| 🃏 Kartu Memori* | Buka dua kartu, temukan pasangannya | menjodohkan |
+| 🔡 Tebak Kata* | Tebak huruf dari petunjuk sebelum balon habis | kata rahasia |
+| 🔤 Susun Huruf | Huruf diacak, susun menjadi kata | kata rahasia |
+| 🗂️ Kelompokkan | Ketuk/seret item ke kelompok yang tepat | kelompokkan |
+| ✍️ Lengkapi Kalimat | Isi bagian rumpang dari bank kata | lengkapi kalimat |
+| 🔍 Cari Kata | Temukan kata tersembunyi di kotak huruf | cari kata |
+| 🎡 Roda Putar | Roda memilih soal berikutnya secara acak | semua jenis |
+| 🎁 Kotak Misteri | Pilih kotak, buka, jawab soal di dalamnya | semua jenis |
+
+\* Mode latihan: kunci jawaban perlu ada di perangkat siswa agar bisa dimainkan. Untuk ulangan resmi, pakai Kuis Klasik
+dengan "Tampilkan benar/salah langsung" dimatikan. Semua jenis tetap dinilai ulang di server (0–100).
+
 ## ✨ Fitur
 
 | Untuk siswa | Untuk guru |
@@ -61,12 +80,16 @@ Setelah terhubung:
    misalnya `https://agnesmuthia.github.io`. Klik **Create** dan salin **Client ID**.
 4. Di aplikasi: **Guru → Pengaturan → Login Google untuk siswa**, tempel Client ID, lalu **Simpan**.
 5. Di editor game, pada **Cara login siswa** pilih **Akun Google (Gmail)**. Opsional: batasi domain email.
+6. **Guru juga bisa masuk dengan Gmail.** Pemilik Apps Script selalu diizinkan; guru lain ditambahkan di
+   **Pengaturan → Guru yang boleh masuk dengan Gmail**. Kata sandi `TEACHER_KEY` tetap berfungsi sebagai cadangan.
 
 Client ID bukan rahasia. Kata sandi guru (`TEACHER_KEY`) tetap hanya ada di Script Properties.
 
 ## ⬆️ Memperbarui aplikasi
 
-- **Tampilan (GitHub Pages)** diperbarui otomatis 1–3 menit setelah perubahan di-push.
+- **Tampilan (GitHub Pages)** diperbarui otomatis 1–3 menit setelah perubahan di-push. File JavaScript/CSS memakai
+  penanda versi (`?v=…` di `index.html`) agar browser tidak memakai salinan lama; naikkan angkanya setiap rilis.
+  Jika tampilan masih terlihat lama, tekan **Ctrl+Shift+R** (Windows) atau **Cmd+Shift+R** (Mac).
 - **Backend (`Code.gs`)** harus disalin ulang ke Apps Script lalu **Terapkan → Kelola deployment → ✏️ → Versi baru → Terapkan**.
   Dasbor guru menampilkan peringatan jika versi `Code.gs` sudah tertinggal. Data nilai tidak berubah dan URL `/exec` tetap sama.
 

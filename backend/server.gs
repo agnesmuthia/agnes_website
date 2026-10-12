@@ -55,6 +55,7 @@ function cekPengaturan() {
   var key = SheetsDB.teacherKey();
   console.log(key ? 'TEACHER_KEY sudah diatur (' + key.length + ' karakter).' : 'PERINGATAN: TEACHER_KEY belum diatur di Script Properties.');
   console.log('Versi backend: ' + Core.VERSION);
+  console.log('Pemilik (selalu boleh masuk dengan Gmail): ' + ownerEmail_());
   console.log('Zona waktu skrip: ' + Session.getScriptTimeZone());
   console.log('Folder Drive utama: ' + pathOf_(root_(true)));
   UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=x', { muteHttpExceptions: true });
@@ -113,6 +114,17 @@ function fromResult_(o) {
 
 /* ---------- Pengaturan & folder Drive ---------- */
 function props_() { return PropertiesService.getScriptProperties(); }
+
+var SESSION_TTL = 21600; // 6 jam, diperpanjang otomatis selama guru aktif
+
+function teacherEmails_() {
+  return String(props_().getProperty('TEACHER_EMAILS') || '').split(',')
+    .map(function (e) { return e.trim().toLowerCase(); }).filter(Boolean);
+}
+
+function ownerEmail_() {
+  try { return String(Session.getEffectiveUser().getEmail() || '').toLowerCase(); } catch (e) { return ''; }
+}
 
 function setProp_(key, val) {
   if (val === '' || val === null || val === undefined) props_().deleteProperty(key);
@@ -319,12 +331,14 @@ var SheetsDB = {
   getConfig: function () {
     var p = props_().getProperties();
     return {
+      teacherEmails: teacherEmails_(),
       googleClientId: p.GOOGLE_CLIENT_ID || '', driveRootId: p.DRIVE_ROOT_ID || '', schoolYear: p.SCHOOL_YEAR || '',
       autoSave: p.AUTO_SAVE === '1', autoSaveMode: p.AUTO_SAVE_MODE || 'perClass', lastAutoSave: p.LAST_AUTOSAVE || ''
     };
   },
   setConfig: function (c) {
     if ('googleClientId' in c) setProp_('GOOGLE_CLIENT_ID', c.googleClientId);
+    if ('teacherEmails' in c) setProp_('TEACHER_EMAILS', c.teacherEmails.join(','));
     if ('schoolYear' in c) setProp_('SCHOOL_YEAR', c.schoolYear);
     if ('autoSaveMode' in c) setProp_('AUTO_SAVE_MODE', c.autoSaveMode);
     if ('driveRootId' in c) {
@@ -347,6 +361,30 @@ var SheetsDB = {
       schoolYear: schoolYear_(), triggerActive: triggerActive_(), autoSaveHour: AUTO_SAVE_HOUR,
       timeZone: Session.getScriptTimeZone()
     };
+  },
+
+  /* ---------- Login Gmail guru (sesi) ---------- */
+  ownerEmail: function () { return ownerEmail_(); },
+  isTeacherEmail: function (email) {
+    email = String(email || '').toLowerCase();
+    if (!email) return false;
+    return email === ownerEmail_() || teacherEmails_().indexOf(email) >= 0;
+  },
+  createSession: function (email) {
+    var token = 'gs_' + Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+    CacheService.getScriptCache().put('sess_' + token, email, SESSION_TTL);
+    return token;
+  },
+  checkSession: function (token) {
+    var cache = CacheService.getScriptCache();
+    var email = cache.get('sess_' + token);
+    if (!email) return '';
+    if (!this.isTeacherEmail(email)) { cache.remove('sess_' + token); return ''; } // email sudah dihapus dari daftar
+    cache.put('sess_' + token, email, SESSION_TTL);
+    return email;
+  },
+  endSession: function (token) {
+    CacheService.getScriptCache().remove('sess_' + token);
   },
 
   /* ---------- Login Google siswa ---------- */
@@ -458,7 +496,7 @@ var SheetsDB = {
     var changed = {};
     all.forEach(function (r) {
       var t = String(r.finishedAt || r.startedAt || '');
-      if (!last || t > last) changed[r.code] = 1;
+      if (!last || t >= last) changed[r.code] = 1; // >= agar aktivitas pada milidetik yang sama tidak terlewat
     });
     var saved = [], errors = [], self = this;
     Object.keys(changed).forEach(function (code) {

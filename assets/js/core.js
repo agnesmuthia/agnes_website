@@ -4,7 +4,7 @@
  * backend/Code.gs untuk Google Sheets, dengan objek `db` yang berbeda.
  */
 var Core = (function () {
-  var VERSION = 2; // naikkan setiap kali backend (Code.gs) berubah
+  var VERSION = 3; // naikkan setiap kali backend (Code.gs) berubah
   var TEACHER_ACTIONS = ['listGames', 'saveGame', 'deleteGame', 'results', 'resetAttempts', 'exportDrive',
     'getConfig', 'saveConfig', 'driveFolders', 'driveCreateFolder', 'driveHistory', 'runAutoSave'];
   var NO_DRIVE = 'Fitur Google Drive hanya tersedia jika aplikasi terhubung ke Google Sheets (menu Pengaturan).';
@@ -67,7 +67,7 @@ var Core = (function () {
     var google = s.loginMode === 'google';
     return {
       code: g.code, title: g.title, subject: g.subject, cls: g.cls || '', description: g.description || '',
-      theme: g.theme || 'galaxy', questionCount: questionTotal(g),
+      theme: g.theme || 'galaxy', mode: Logic.mode(g), questionCount: questionTotal(g),
       settings: {
         timePerQuestion: Number(s.timePerQuestion) || 0, maxAttempts: Number(s.maxAttempts) || 0,
         showFeedback: !!s.showFeedback, showLeaderboard: !!s.showLeaderboard, powerUps: !!s.powerUps,
@@ -94,10 +94,13 @@ var Core = (function () {
 
   function validateGame(g) {
     if (!g || !String(g.title || '').trim()) fail('Judul game wajib diisi.');
+    g.mode = Logic.mode(g);
     if (!g.questions || !g.questions.length) fail('Tambahkan minimal 1 soal.');
     g.questions.forEach(function (q, i) {
       var n = 'Soal ' + (i + 1) + ': ';
       if (!q.id) q.id = uid();
+      var DEFAULT_Q = { cloze: 'Lengkapi kalimat berikut.', wordsearch: 'Temukan kata-kata berikut.', group: 'Kelompokkan item berikut.' };
+      if (!String(q.q || '').trim() && DEFAULT_Q[q.type]) q.q = DEFAULT_Q[q.type];
       if (!String(q.q || '').trim()) fail(n + 'pertanyaan masih kosong.');
       if (q.type === 'mcq') {
         q.options = (q.options || []).map(String).filter(function (o) { return o.trim(); });
@@ -115,6 +118,39 @@ var Core = (function () {
       } else if (q.type === 'order') {
         q.items = (q.items || []).map(String).filter(function (o) { return o.trim(); });
         if (q.items.length < 2) fail(n + 'minimal 2 item untuk diurutkan.');
+      } else if (q.type === 'group') {
+        q.groups = (q.groups || []).map(function (gr) {
+          return {
+            name: String(gr.name || '').trim(),
+            items: (gr.items || []).map(function (t) { return String(t).trim(); }).filter(Boolean)
+          };
+        }).filter(function (gr) { return gr.name && gr.items.length; });
+        if (q.groups.length < 2) fail(n + 'minimal 2 kelompok, masing-masing berisi item.');
+        if (q.groups.length > 4) fail(n + 'maksimal 4 kelompok.');
+      } else if (q.type === 'word') {
+        q.answer = String(q.answer || '').trim().toUpperCase();
+        var wl = Logic.letters(q.answer).length;
+        if (wl < 2) fail(n + 'kata jawaban minimal 2 huruf.');
+        if (wl > 20) fail(n + 'kata jawaban maksimal 20 huruf.');
+      } else if (q.type === 'cloze') {
+        q.text = String(q.text || '').trim();
+        if (!Logic.clozeParts(q.text).blanks.length) fail(n + 'tandai kata yang dikosongkan dengan kurung siku, cth. [Jakarta].');
+        q.extra = (q.extra || []).map(function (t) { return String(t).trim(); }).filter(Boolean);
+      } else if (q.type === 'multi') {
+        q.items = (q.items || []).map(function (it) { return [String(it[0] || '').trim(), !!it[1]]; })
+          .filter(function (it) { return it[0]; });
+        if (q.items.length < 3) fail(n + 'minimal 3 pilihan.');
+        if (!q.items.some(function (it) { return it[1]; })) fail(n + 'tandai minimal 1 jawaban benar.');
+      } else if (q.type === 'wordsearch') {
+        q.words = (q.words || []).map(function (w) { return String(w).trim().toUpperCase(); })
+          .filter(function (w) { return Logic.letters(w).length; });
+        if (q.words.length < 2) fail(n + 'minimal 2 kata untuk dicari.');
+        if (q.words.length > 12) fail(n + 'maksimal 12 kata.');
+        q.words.forEach(function (w) {
+          var l = Logic.letters(w).length;
+          if (l < 3 || l > 14) fail(n + 'kata "' + w + '" harus 3–14 huruf.');
+        });
+        Logic.makeWordsearch(q.words);
       } else {
         fail(n + 'jenis soal tidak dikenal.');
       }
@@ -130,13 +166,18 @@ var Core = (function () {
   }
 
   // Penanda (bukan penolakan) agar jawaban siswa tidak hilang, tetapi guru tahu.
-  function lateFlags(r, s) {
+  function lateFlags(r, g) {
+    var s = g.settings || {};
     var flags = [];
     var fin = Date.parse(r.finishedAt);
     if (s.closeAt && fin > Date.parse(s.closeAt) + 120000) flags.push('Dikirim setelah game ditutup');
     var tpq = Number(s.timePerQuestion) || 0;
     if (tpq > 0) {
-      var limit = Number(r.total) * (tpq + 4) + (s.powerUps ? 15 : 0) + 120;
+      var m = Logic.mode(g), types = {};
+      (g.questions || []).forEach(function (q) { types[q.id] = q.type; });
+      var perQ = m === 'wheel' || m === 'box' ? 12 : 5; // waktu animasi/umpan balik per soal
+      var limit = (s.powerUps ? 15 : 0) + 120;
+      (r.servedKey || []).forEach(function (k) { limit += Logic.timeFor(types[k.id] || 'mcq', m, tpq) + perQ; });
       if (Number(r.durationSec) > limit) flags.push('Melebihi batas waktu pengerjaan');
     }
     return flags.join('; ');
@@ -160,6 +201,12 @@ var Core = (function () {
     if ('driveRootId' in c) out.driveRootId = String(c.driveRootId || '').trim();
     if ('autoSave' in c) out.autoSave = !!c.autoSave;
     if ('autoSaveMode' in c) out.autoSaveMode = c.autoSaveMode === 'combined' ? 'combined' : 'perClass';
+    if ('teacherEmails' in c) {
+      var list = (Array.isArray(c.teacherEmails) ? c.teacherEmails : String(c.teacherEmails || '').split(/[,;\s]+/))
+        .map(function (e) { return String(e).trim().toLowerCase(); }).filter(Boolean);
+      list.forEach(function (e) { if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) fail('Email guru tidak valid: ' + e); });
+      out.teacherEmails = list.filter(function (e, i) { return list.indexOf(e) === i; }).slice(0, 50);
+    }
     return out;
   }
 
@@ -177,12 +224,31 @@ var Core = (function () {
     req = req || {};
     var action = req.action;
     var tkey = db.teacherKey();
-    var isTeacher = !!tkey && !!req.auth && sameKey(req.auth, tkey);
+    var auth = String(req.auth || '');
+    var isTeacher = (!!tkey && !!auth && sameKey(auth, tkey)) ||
+      (auth.indexOf('gs_') === 0 && !!db.checkSession && !!db.checkSession(auth));
     if (TEACHER_ACTIONS.indexOf(action) >= 0 && !isTeacher) fail('Kata sandi guru salah.');
 
     switch (action) {
       case 'ping':
-        return { mode: db.mode, teacher: isTeacher, configured: !!tkey, version: VERSION, googleLogin: !!config(db).googleClientId };
+        var cfgP = config(db);
+        return {
+          mode: db.mode, teacher: isTeacher, configured: !!tkey, version: VERSION,
+          googleLogin: !!cfgP.googleClientId, googleClientId: cfgP.googleClientId || ''
+        };
+
+      case 'teacherGoogle': {
+        if (!db.verifyGoogleToken || !db.createSession) fail('Login Gmail guru hanya tersedia jika aplikasi terhubung ke Google Sheets.');
+        var who = db.verifyGoogleToken(String(req.idToken || ''));
+        if (!db.isTeacherEmail(who.email)) {
+          fail('Email ' + who.email + ' belum terdaftar sebagai guru. Masuk dengan kata sandi, lalu tambahkan email ini di menu Pengaturan.');
+        }
+        return { session: db.createSession(who.email), email: who.email, name: who.name };
+      }
+
+      case 'logout':
+        if (auth.indexOf('gs_') === 0 && db.endSession) db.endSession(auth);
+        return {};
 
       case 'getGame': {
         var g = needGame(db, req.code);
@@ -246,7 +312,7 @@ var Core = (function () {
           r.xp = Math.max(0, Math.min(999999, Number(req.xp) || 0));
           r.finishedAt = nowIso();
           r.durationSec = Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt)) / 1000);
-          r.flags = lateFlags(r, g2.settings || {});
+          r.flags = lateFlags(r, g2);
           db.updateResult(r);
         }
         var s2 = g2.settings || {};
@@ -337,12 +403,13 @@ var Core = (function () {
       }
 
       case 'getConfig':
-        return { config: config(db), drive: db.driveInfo ? db.driveInfo() : null };
+        return { config: config(db), drive: db.driveInfo ? db.driveInfo() : null, owner: db.ownerEmail ? db.ownerEmail() : '',
+          me: auth.indexOf('gs_') === 0 && db.checkSession ? db.checkSession(auth) : '' };
 
       case 'saveConfig': {
         if (!db.setConfig) fail(NO_DRIVE);
         db.setConfig(cleanConfig(req.config));
-        return { config: config(db), drive: db.driveInfo ? db.driveInfo() : null };
+        return { config: config(db), drive: db.driveInfo ? db.driveInfo() : null, owner: db.ownerEmail ? db.ownerEmail() : '' };
       }
 
       case 'driveFolders':

@@ -19,6 +19,7 @@ var Teacher = (function () {
         return '<a href="#/guru' + (n[0] ? '/' + n[0] : '') + '" class="' + (active === n[0] ? 'on' : '') + '"><span>' + n[1] + '</span>' + n[2] + '</a>';
       }).join('') + '</nav>' +
       '<div class="side-foot"><div class="mode-pill ' + (Api.isLocal() ? 'local' : 'cloud') + '">' + (Api.isLocal() ? '💻 Mode Lokal' : '☁️ Google Sheets') + '</div>' +
+      (sessionStorage.getItem('gb_temail') ? '<div class="who small" title="Masuk dengan Gmail">👤 ' + esc(sessionStorage.getItem('gb_temail')) + '</div>' : '') +
       '<button class="btn small ghost full" id="logout">Keluar</button></div></aside>' +
       '<main class="main" id="main">' +
       (Api.isLocal() && active !== 'pengaturan' ? '<div class="notice warn">💻 <span><b>Mode Lokal:</b> data hanya tersimpan di browser ini, sehingga siswa belum bisa bermain dari perangkat lain. ' +
@@ -27,7 +28,10 @@ var Teacher = (function () {
         Api.backendVersion() + ', aplikasi membutuhkan versi ' + Api.REQUIRED_BACKEND + '. Fitur folder Drive, login Google siswa, dan simpan otomatis belum aktif. ' +
         '<a href="#/guru/pengaturan">Lihat cara memperbarui</a>.</span></div>' : '') +
       content + '</main></div>';
-    $('#logout').onclick = function () { Api.setAuth(''); cache.games = null; location.hash = '#/'; };
+    $('#logout').onclick = function () {
+      if (Api.auth().indexOf('gs_') === 0) Api.call('logout').catch(function () { /* sesi tetap kedaluwarsa sendiri */ });
+      Api.setAuth(''); sessionStorage.removeItem('gb_temail'); cache.games = null; location.hash = '#/';
+    };
   }
 
   function loadingMain(active) { shell(active, '<div class="center-box"><div class="spinner dark"></div><p>Memuat…</p></div>'); }
@@ -55,6 +59,7 @@ var Teacher = (function () {
       '<header class="topbar"><a class="logo" href="#/">🎮 <b>Game</b>Belajar</a></header>' +
       '<form class="card glass login-card" id="tl"><div class="big-emoji">👩‍🏫</div>' +
       '<h2>' + (needPin ? 'Buat PIN Guru' : 'Masuk sebagai Guru') + '</h2>' +
+      (local ? '' : '<div id="tgoogle" class="tgoogle" hidden><div id="tgbtn"></div><div class="or"><span>atau masuk dengan kata sandi</span></div></div>') +
       '<p class="muted">' + (needPin ? 'Buat PIN untuk melindungi dasbor di perangkat ini (Mode Lokal).'
         : local ? 'Masukkan PIN guru perangkat ini.' : 'Masukkan kata sandi guru (TEACHER_KEY di Google Apps Script).') + '</p>' +
       '<input type="password" name="k" required minlength="4" placeholder="' + (needPin ? 'PIN baru (min. 4 karakter)' : 'Kata sandi / PIN') + '" autocomplete="current-password">' +
@@ -62,6 +67,33 @@ var Teacher = (function () {
       '<button class="btn big glow full">Masuk</button>' +
       '<p class="small muted">Server: ' + (local ? 'Mode Lokal (browser ini)' : 'Google Sheets') + ' · <a href="#/guru/pengaturan" id="toset">ubah</a></p></form>');
     $('#toset').onclick = function (e) { e.preventDefault(); settingsPublic(); };
+    function enter(r) {
+      Api.setBackendInfo(r);
+      U.toast('Selamat datang! 👋', 'ok');
+      route(location.hash.replace(/^#\/guru\/?/, ''));
+    }
+    if (!local) {
+      Api.call('ping').then(function (r) {
+        if (!r.googleClientId || !$('#tgoogle')) return;
+        $('#tgoogle').hidden = false;
+        return U.loadGis().then(function () {
+          window.google.accounts.id.initialize({
+            client_id: r.googleClientId, auto_select: false,
+            callback: function (resp) {
+              Api.call('teacherGoogle', { idToken: resp.credential }).then(function (res) {
+                Api.setAuth(res.session);
+                sessionStorage.setItem('gb_temail', res.email);
+                return Api.call('ping');
+              }).then(function (p) {
+                if (!p.teacher) throw new Error('Sesi tidak valid, coba lagi.');
+                enter(p);
+              }).catch(function (err) { Api.setAuth(''); sessionStorage.removeItem('gb_temail'); U.toast(err.message, 'err'); });
+            }
+          });
+          window.google.accounts.id.renderButton($('#tgbtn'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'signin_with', locale: 'id', width: 280 });
+        });
+      }).catch(function () { /* tombol Google tidak ditampilkan */ });
+    }
     $('#tl').onsubmit = function (e) {
       e.preventDefault();
       var k = e.target.k.value;
@@ -73,9 +105,8 @@ var Teacher = (function () {
       Api.call('ping').then(function (r) {
         if (r.configured === false) throw new Error('TEACHER_KEY belum diatur di Script Properties Google Apps Script.');
         if (!r.teacher) throw new Error(local ? 'PIN salah.' : 'Kata sandi guru salah.');
-        Api.setBackendInfo(r);
-        U.toast('Selamat datang! 👋', 'ok');
-        route(location.hash.replace(/^#\/guru\/?/, ''));
+        sessionStorage.removeItem('gb_temail');
+        enter(r);
       }).catch(function (err) { Api.setAuth(''); U.toast(err.message, 'err'); });
     };
   }
@@ -160,7 +191,8 @@ var Teacher = (function () {
     return '<article class="gcard theme-' + esc(g.theme in THEMES ? g.theme : 'galaxy') + '" data-code="' + esc(g.code) + '">' +
       '<div class="gc-top"><span class="gc-icon">' + th.icon + '</span><span class="badge ' + st[1] + '">' + st[0] + '</span></div>' +
       '<h4>' + esc(g.title) + '</h4>' +
-      '<div class="gc-meta"><span class="chip">' + esc(g.subject || 'Umum') + '</span>' + (g.cls ? '<span class="chip">' + esc(g.cls) + '</span>' : '') + '</div>' +
+      '<div class="gc-meta"><span class="chip">' + esc(g.subject || 'Umum') + '</span>' + (g.cls ? '<span class="chip">' + esc(g.cls) + '</span>' : '') +
+      '<span class="chip">' + (MODES[g.mode] || MODES.classic).icon + ' ' + esc((MODES[g.mode] || MODES.classic).name) + '</span></div>' +
       '<div class="gc-stats"><span>❓ ' + g.questions.length + ' soal</span><span>🧑‍🎓 ' + (g.participants || 0) + '</span><span>🔑 <b>' + esc(g.code) + '</b></span></div>' +
       '<div class="gc-actions">' +
       '<button data-a="share" title="Bagikan">🔗 Bagikan</button><button data-a="edit" title="Sunting">✏️</button>' +
@@ -305,8 +337,9 @@ var Teacher = (function () {
   function templates() {
     shell('template', '<div class="page-head"><div><h1>🎨 Galeri Template</h1><p class="muted">Pilih template, ubah soalnya, dan game siap dibagikan dalam hitungan menit.</p></div>' +
       '<label class="btn ghost">📥 Impor template (.json)<input type="file" accept=".json" id="imp" hidden></label></div>' +
-      '<h3>🧩 Jenis permainan</h3><div class="qtypes">' + Object.keys(QTYPES).map(function (k) {
-        return '<div class="qt"><span>' + QTYPES[k].icon + '</span><b>' + QTYPES[k].name + '</b><small>' + QTYPES[k].hint + '</small></div>';
+      '<h3>🎮 Jenis permainan</h3><p class="muted small">Setiap jenis punya cara main yang berbeda. Klik untuk membuat game baru dengan jenis tersebut.</p>' +
+      '<div class="mode-pick gallery">' + Object.keys(MODES).map(function (k) {
+        return '<a class="mode-card" href="#/guru/buat/mode-' + k + '"><span>' + MODES[k].icon + '</span><b>' + MODES[k].name + '</b><small>' + MODES[k].desc + '</small></a>';
       }).join('') + '</div>' +
       '<h3>🌈 Tema visual</h3><div class="theme-row">' + Object.keys(THEMES).map(function (k) {
         return '<div class="theme-swatch theme-' + k + '"><span>' + THEMES[k].icon + '</span><b>' + THEMES[k].name + '</b><small>' + THEMES[k].desc + '</small></div>';
@@ -314,7 +347,8 @@ var Teacher = (function () {
       '<h3>📚 Template siap pakai</h3><div class="gcards">' + TEMPLATES.map(function (t) {
         var types = {};
         t.questions.forEach(function (q) { types[q.type] = 1; });
-        return '<article class="gcard tpl theme-' + t.theme + '"><div class="gc-top"><span class="gc-icon">' + THEMES[t.theme].icon + '</span><span class="badge">' + esc(t.mode) + '</span></div>' +
+        var md = MODES[t.mode] || MODES.classic;
+        return '<article class="gcard tpl theme-' + t.theme + '"><div class="gc-top"><span class="gc-icon">' + md.icon + '</span><span class="badge">' + (t.exam ? '📝 Mode Ujian' : esc(md.name)) + '</span></div>' +
           '<h4>' + esc(t.title) + '</h4><p class="small">' + esc(t.description) + '</p>' +
           '<div class="gc-meta"><span class="chip">' + esc(t.subject) + '</span>' + Object.keys(types).map(function (k) { return '<span class="chip" title="' + QTYPES[k].name + '">' + QTYPES[k].icon + '</span>'; }).join('') + '</div>' +
           '<div class="gc-actions"><a class="btn small" href="#/guru/buat/' + t.id + '">Pakai template →</a>' +
@@ -332,7 +366,7 @@ var Teacher = (function () {
   /* ================= EDITOR ================= */
   function blankGame() {
     return {
-      code: '', title: '', subject: 'Matematika', cls: '', description: '', theme: 'galaxy',
+      code: '', title: '', subject: 'Matematika', cls: '', description: '', theme: 'galaxy', mode: 'classic',
       settings: Object.assign({}, DEFAULT_SETTINGS), questions: [newQuestion('mcq')]
     };
   }
@@ -344,6 +378,11 @@ var Teacher = (function () {
     if (type === 'short') q.answers = [''];
     if (type === 'match') q.pairs = [['', ''], ['', ''], ['', '']];
     if (type === 'order') q.items = ['', '', ''];
+    if (type === 'group') q.groups = [{ name: '', items: [] }, { name: '', items: [] }];
+    if (type === 'word') q.answer = '';
+    if (type === 'cloze') { q.text = ''; q.extra = []; }
+    if (type === 'multi') q.items = [['', true], ['', false], ['', false], ['', false]];
+    if (type === 'wordsearch') q.words = [];
     return q;
   }
 
@@ -356,11 +395,16 @@ var Teacher = (function () {
         if (!g) throw new Error('Game tidak ditemukan.');
         var d = JSON.parse(JSON.stringify(g));
         d.settings = Object.assign({}, DEFAULT_SETTINGS, d.settings);
+        d.mode = MODES[d.mode] ? d.mode : 'classic';
         delete d.participants; delete d.status;
         return d;
       });
     } else if (tpl === 'impor' && D) {
       p = Promise.resolve(D);
+    } else if (tpl && tpl.indexOf('mode-') === 0) {
+      var nb = blankGame(), mk = tpl.slice(5);
+      if (MODES[mk]) { nb.mode = mk; nb.questions = [newQuestion(MODES[mk].types[0])]; }
+      p = Promise.resolve(nb);
     } else if (tpl) {
       var t = TEMPLATES.filter(function (x) { return x.id === tpl; })[0];
       p = Promise.resolve(t ? gameFromTemplate(t) : blankGame());
@@ -389,6 +433,11 @@ var Teacher = (function () {
       '<label class="grow">Kelas sasaran<input data-g="cls" maxlength="40" value="' + esc(D.cls || '') + '" placeholder="cth. XI IPA"></label></div>' +
       '<label>Deskripsi / petunjuk untuk siswa<textarea data-g="description" rows="2" maxlength="300">' + esc(D.description || '') + '</textarea></label></section>' +
 
+      '<section class="card"><h3>🎮 Jenis permainan</h3><p class="muted small">Pilih cara bermain. Setiap jenis punya tampilan dan tantangan berbeda.</p>' +
+      '<div class="mode-pick">' + Object.keys(MODES).map(function (k) {
+        return '<button type="button" class="mode-card' + (D.mode === k ? ' on' : '') + '" data-mode="' + k + '"><span>' + MODES[k].icon + '</span><b>' + MODES[k].name + '</b><small>' + MODES[k].desc + '</small></button>';
+      }).join('') + '</div><div id="modeNote"></div></section>' +
+
       '<section class="card"><h3>🌈 Tema tampilan</h3><div class="theme-pick">' + Object.keys(THEMES).map(function (k) {
         return '<button type="button" class="theme-swatch theme-' + k + (D.theme === k ? ' on' : '') + '" data-theme="' + k + '"><span>' + THEMES[k].icon + '</span><b>' + THEMES[k].name + '</b></button>';
       }).join('') + '</div></section>' +
@@ -396,9 +445,7 @@ var Teacher = (function () {
       '<section class="card"><div class="row between wrap gap"><h3>❓ Soal <span class="muted" id="qcount"></span></h3>' +
       '<button class="btn small ghost" id="bulk">⚡ Impor soal cepat (teks)</button></div>' +
       '<div id="qlist"></div>' +
-      '<div class="add-q"><span>Tambah soal:</span>' + Object.keys(QTYPES).map(function (k) {
-        return '<button type="button" class="btn small" data-add="' + k + '">' + QTYPES[k].icon + ' ' + QTYPES[k].name + '</button>';
-      }).join('') + '</div></section>' +
+      '<div class="add-q" id="addq"></div></section>' +
       '</div>' +
 
       '<aside class="ed-side"><section class="card"><h3>⚙️ Aturan & Akses</h3>' +
@@ -429,6 +476,7 @@ var Teacher = (function () {
       '</section></aside></div>');
 
     drawQuestions();
+    drawModeExtras();
 
     var main = $('#main');
     main.addEventListener('input', onEdit);
@@ -437,11 +485,36 @@ var Teacher = (function () {
     $('#save').onclick = save;
     $('#bulk').onclick = bulkImport;
     $('#preview').onclick = function () {
-      U.modal('<div class="preview-frame">' + Student.themed(D.theme, '<div class="play"><div class="qcard pop"><div class="qtype">🔠 Pilihan Ganda</div>' +
-        '<h2 class="qtext">' + esc((D.questions[0] && D.questions[0].q) || 'Contoh pertanyaan') + '</h2></div><div class="answers"><div class="opts n4">' +
-        ['A', 'B', 'C', 'D'].map(function (x, i) { return '<button class="opt c' + i + '"><span class="shape">' + ['▲', '◆', '●', '■'][i] + '</span><span class="ot">Pilihan ' + x + '</span></button>'; }).join('') +
+      var q0 = D.questions.filter(function (q) { return q.type === 'mcq'; })[0];
+      var opts = q0 ? q0.options.filter(function (o) { return o.trim(); }) : [];
+      if (opts.length < 2) opts = ['Pilihan A', 'Pilihan B', 'Pilihan C', 'Pilihan D'];
+      var md = MODES[D.mode] || MODES.classic;
+      U.modal('<div class="preview-frame">' + Student.themed(D.theme, '<div class="play"><div class="qcard pop"><div class="qtype">' + md.icon + ' ' + esc(md.name) + '</div>' +
+        '<h2 class="qtext">' + esc((q0 && q0.q) || (D.questions[0] && D.questions[0].q) || 'Contoh pertanyaan') + '</h2></div><div class="answers"><div class="opts n' + Math.min(opts.length, 6) + '">' +
+        opts.slice(0, 6).map(function (x, i) { return '<button class="opt c' + i + '"><span class="shape">' + ['▲', '◆', '●', '■', '★', '⬟'][i] + '</span><span class="ot">' + esc(x) + '</span></button>'; }).join('') +
         '</div></div></div>') + '</div>', { wide: true });
     };
+  }
+
+  function drawModeExtras() {
+    var md = MODES[D.mode] || MODES.classic;
+    var rec = md.types, others = ALL_TYPES.filter(function (k) { return rec.indexOf(k) < 0; });
+    $('#addq').innerHTML = '<span>Tambah soal:</span>' + rec.map(function (k) {
+      return '<button type="button" class="btn small" data-add="' + k + '">' + QTYPES[k].icon + ' ' + QTYPES[k].name + '</button>';
+    }).join('') + (others.length ? '<details class="more-types"><summary>Jenis lain</summary>' + others.map(function (k) {
+      return '<button type="button" class="btn small ghost" data-add="' + k + '">' + QTYPES[k].icon + ' ' + QTYPES[k].name + '</button>';
+    }).join('') + '<small class="muted">Soal jenis lain tetap bisa dimainkan dengan tampilan standar.</small></details>' : '');
+    var note = '';
+    if (md.reveal) {
+      note += '<div class="notice warn small">🎓 <span><b>Mode latihan:</b> ' + esc(md.name) + ' membutuhkan kunci jawaban di perangkat siswa agar bisa dimainkan. ' +
+        'Cocok untuk latihan; untuk ulangan resmi gunakan <b>Kuis Klasik</b> dengan "Tampilkan benar/salah langsung" dimatikan.</span></div>';
+    }
+    var odd = D.questions.filter(function (q) { return rec.indexOf(q.type) < 0; });
+    if (odd.length) {
+      note += '<div class="notice small">ℹ️ <span>' + odd.length + ' soal bukan jenis ' + esc(rec.map(function (k) { return QTYPES[k].name; }).join(' / ')) +
+        '. Soal tersebut tetap dimainkan dengan tampilan standar.</span></div>';
+    }
+    $('#modeNote').innerHTML = note;
   }
 
   function loginHelp() {
@@ -486,12 +559,35 @@ var Teacher = (function () {
             '<button type="button" class="x" data-act="itemup" data-j="' + j + '" ' + (j === 0 ? 'disabled' : '') + ' aria-label="Naik">↑</button>' +
             (q.items.length > 2 ? '<button type="button" class="x" data-act="delitem" data-j="' + j + '" aria-label="Hapus">✕</button>' : '') + '</div>';
         }).join('') + '</div>' + (q.items.length < 8 ? '<button type="button" class="link" data-act="additem">+ Tambah item</button>' : '');
+      } else if (q.type === 'group') {
+        body = '<div class="grp-edit">' + q.groups.map(function (g, j) {
+          return '<div class="ge c' + j + '"><div class="pr"><input data-f="gname" data-j="' + j + '" value="' + esc(g.name) + '" placeholder="Nama kelompok ' + (j + 1) + '">' +
+            (q.groups.length > 2 ? '<button type="button" class="x" data-act="delgroup" data-j="' + j + '" aria-label="Hapus kelompok">✕</button>' : '') + '</div>' +
+            '<textarea data-f="gitems" data-j="' + j + '" rows="' + Math.max(3, g.items.length + 1) + '" placeholder="Satu item per baris">' + esc(g.items.join('\n')) + '</textarea></div>';
+        }).join('') + '</div>' + (q.groups.length < 4 ? '<button type="button" class="link" data-act="addgroup">+ Tambah kelompok</button>' : '');
+      } else if (q.type === 'word') {
+        body = '<label>Kata jawaban<input data-f="wanswer" maxlength="40" value="' + esc(q.answer || '') + '" placeholder="cth. MITOKONDRIA"></label>' +
+          '<small class="muted">Huruf/angka saja (spasi boleh untuk dua kata). Dipakai di mode Susun Huruf dan Tebak Kata.</small>';
+      } else if (q.type === 'cloze') {
+        body = '<label>Teks dengan bagian kosong<textarea data-f="ctext" rows="3" placeholder="Ibu kota Indonesia adalah [Jakarta] dan terletak di Pulau [Jawa].">' + esc(q.text || '') + '</textarea></label>' +
+          '<small class="muted">Tulis kata yang harus diisi siswa di dalam <b>[kurung siku]</b>.</small>' +
+          '<label>Kata pengecoh (opsional, pisahkan dengan ;)<input data-f="cextra" value="' + esc((q.extra || []).join('; ')) + '" placeholder="cth. Bandung; Sumatra"></label>';
+      } else if (q.type === 'multi') {
+        body = '<small class="muted">Centang semua jawaban yang benar. Di mode Pukul Tikus, pilihan ini muncul di atas tikus.</small><div class="pairs">' + q.items.map(function (it, j) {
+          return '<div class="pr"><label class="chk" title="Tandai benar"><input type="checkbox" data-f="mok" data-j="' + j + '" ' + (it[1] ? 'checked' : '') + '><span>✔</span></label>' +
+            '<input data-f="mtext" data-j="' + j + '" value="' + esc(it[0]) + '" placeholder="Pilihan ' + (j + 1) + '">' +
+            (q.items.length > 3 ? '<button type="button" class="x" data-act="delmulti" data-j="' + j + '" aria-label="Hapus">✕</button>' : '') + '</div>';
+        }).join('') + '</div>' + (q.items.length < 14 ? '<button type="button" class="link" data-act="addmulti">+ Tambah pilihan</button>' : '');
+      } else if (q.type === 'wordsearch') {
+        body = '<label>Kata yang dicari (satu per baris, 3–14 huruf, maks. 12 kata)<textarea data-f="wwords" rows="5" placeholder="ATMOSFER\nLITOSFER\nHIDROSFER">' + esc((q.words || []).join('\n')) + '</textarea></label>';
       }
+      var ph = { word: 'Petunjuk, cth. "Organel penghasil energi"', cloze: 'Instruksi (opsional)', wordsearch: 'Judul teka-teki, cth. "Temukan nama planet!"',
+        multi: 'Perintah, cth. "Pilih/pukul semua bilangan prima!"', group: 'Instruksi, cth. "Kelompokkan hewan berikut"' }[q.type] || 'Tulis pertanyaan…';
       return '<div class="qedit" data-qi="' + i + '"><div class="qe-head"><span class="qnum">' + (i + 1) + '</span><span class="badge">' + t.icon + ' ' + t.name + '</span>' +
         '<span class="grow"></span><button type="button" data-act="up" ' + (i === 0 ? 'disabled' : '') + ' title="Naik">↑</button>' +
         '<button type="button" data-act="down" ' + (i === D.questions.length - 1 ? 'disabled' : '') + ' title="Turun">↓</button>' +
         '<button type="button" data-act="dup" title="Duplikat">⧉</button><button type="button" data-act="del" title="Hapus" class="danger-txt">🗑</button></div>' +
-        '<textarea data-f="q" rows="2" placeholder="Tulis pertanyaan…">' + esc(q.q) + '</textarea>' + body +
+        '<textarea data-f="q" rows="2" placeholder="' + esc(ph) + '">' + esc(q.q) + '</textarea>' + body +
         '<details ' + (q.img ? 'open' : '') + '><summary>🖼️ Gambar (opsional)</summary><input data-f="img" value="' + esc(q.img || '') + '" placeholder="https://… tautan gambar (mis. dari Google Drive publik)"></details></div>';
     }).join('');
   }
@@ -531,9 +627,29 @@ var Teacher = (function () {
     if (f === 'left') q.pairs[j][0] = t.value;
     if (f === 'right') q.pairs[j][1] = t.value;
     if (f === 'item') q.items[j] = t.value;
+    var lines = function (v) { return v.split('\n').map(function (x) { return x.trim(); }).filter(Boolean); };
+    if (f === 'gname') q.groups[j].name = t.value;
+    if (f === 'gitems') q.groups[j].items = lines(t.value);
+    if (f === 'wanswer') q.answer = t.value.toUpperCase();
+    if (f === 'ctext') q.text = t.value;
+    if (f === 'cextra') q.extra = t.value.split(';').map(function (x) { return x.trim(); }).filter(Boolean);
+    if (f === 'mok') q.items[j][1] = t.checked;
+    if (f === 'mtext') q.items[j][0] = t.value;
+    if (f === 'wwords') q.words = lines(t.value.toUpperCase());
   }
 
   function onClick(e) {
+    var mb = e.target.closest('[data-mode]');
+    if (mb) {
+      D.mode = mb.dataset.mode;
+      $$('[data-mode]').forEach(function (b) { b.classList.toggle('on', b === mb); });
+      var rec = MODES[D.mode].types;
+      var only = D.questions.length === 1 && !String(D.questions[0].q || '').trim() && rec.indexOf(D.questions[0].type) < 0;
+      if (only) { D.questions = [newQuestion(rec[0])]; drawQuestions(); }
+      drawModeExtras();
+      U.sfx.click();
+      return;
+    }
     var th = e.target.closest('[data-theme]');
     if (th) {
       D.theme = th.dataset.theme;
@@ -544,6 +660,7 @@ var Teacher = (function () {
     if (add) {
       D.questions.push(newQuestion(add.dataset.add));
       drawQuestions();
+      drawModeExtras();
       var cards = $$('.qedit');
       cards[cards.length - 1].scrollIntoView({ behavior: 'smooth', block: 'center' });
       cards[cards.length - 1].querySelector('textarea').focus({ preventScroll: true });
@@ -572,9 +689,14 @@ var Teacher = (function () {
       case 'additem': q.items.push(''); break;
       case 'delitem': q.items.splice(j, 1); break;
       case 'itemup': q.items.splice(j - 1, 0, q.items.splice(j, 1)[0]); break;
+      case 'addgroup': q.groups.push({ name: '', items: [] }); break;
+      case 'delgroup': q.groups.splice(j, 1); break;
+      case 'addmulti': q.items.push(['', false]); break;
+      case 'delmulti': q.items.splice(j, 1); break;
       default: return;
     }
     drawQuestions();
+    drawModeExtras();
   }
 
   // Format teks cepat:
@@ -1147,6 +1269,16 @@ var Teacher = (function () {
         '<li>Salin <b>Client ID</b> lalu tempel di kolom di atas dan klik Simpan.</li></ol></details>' +
         '<div class="row end"><button class="btn" id="savecid">💾 Simpan Client ID</button></div></section>' +
 
+        '<section class="card" id="tmail"><h3>👩‍🏫 Guru yang boleh masuk dengan Gmail</h3>' +
+        '<p class="muted">Guru di daftar ini bisa masuk ke dasbor dengan tombol <b>Masuk dengan Google</b> (butuh Client ID di atas). ' +
+        'Semua guru di daftar ini memakai data yang sama. Kata sandi guru tetap bisa dipakai sebagai cadangan.</p>' +
+        '<ul class="file-list">' + (r.owner ? '<li><span class="fi-icon">👑</span><span class="fi-main"><b>' + esc(r.owner) + '</b><small class="muted">Pemilik Apps Script, selalu diizinkan</small></span></li>' : '') +
+        c.teacherEmails.map(function (em) {
+          return '<li><span class="fi-icon">👤</span><span class="fi-main"><b>' + esc(em) + '</b></span><button class="btn small ghost" data-rm="' + esc(em) + '">Hapus</button></li>';
+        }).join('') + '</ul>' +
+        '<div class="copy-row"><input id="newt" type="email" placeholder="email.guru@gmail.com"><button class="btn small" id="addt">＋ Tambah guru</button></div>' +
+        (r.me ? '<p class="small muted" style="margin-top:10px">Anda sedang masuk sebagai <b>' + esc(r.me) + '</b>.</p>' : '') + '</section>' +
+
         '<section class="card"><h3>📁 Folder Google Drive</h3>' +
         '<p class="muted">Rekap otomatis disusun dengan struktur: <b>Folder utama / Tahun ajaran / Mata pelajaran / Kelas</b>.</p>' +
         '<div class="drive-root"><span class="fi-icon">📁</span><span class="fi-main"><b id="rootname">' + esc(d.root.path || d.root.name) + '</b>' +
@@ -1174,6 +1306,19 @@ var Teacher = (function () {
         }).catch(function (err) { btn.disabled = false; U.toast(err.message, 'err'); });
       }
       $('#savecid').onclick = function () { save(this, { googleClientId: $('#cid').value.trim() }, 'Client ID tersimpan ✓'); };
+      $('#addt').onclick = function () {
+        var em = $('#newt').value.trim().toLowerCase();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) { U.toast('Tulis alamat email yang valid.', 'err'); return; }
+        save(this, { teacherEmails: c.teacherEmails.concat([em]) }, em + ' ditambahkan ✓');
+      };
+      $('#tmail').addEventListener('click', function (e) {
+        var b = e.target.closest('[data-rm]');
+        if (!b) return;
+        var em = b.getAttribute('data-rm');
+        U.confirm('Hapus ' + em + ' dari daftar guru? Jika sedang masuk, sesinya langsung berakhir.', 'Hapus').then(function (ok) {
+          if (ok) save(b, { teacherEmails: c.teacherEmails.filter(function (x) { return x !== em; }) }, em + ' dihapus');
+        });
+      });
       $('#savedrive').onclick = function () { save(this, { schoolYear: $('#sy').value.trim() }, 'Pengaturan folder tersimpan ✓'); };
       $('#saveauto').onclick = function () {
         save(this, { autoSave: $('#auto').checked, autoSaveMode: $('#amode').value }, $('#auto').checked ? 'Simpan otomatis aktif ✓' : 'Simpan otomatis dimatikan');

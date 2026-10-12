@@ -149,7 +149,11 @@ var U = (function () {
     go: function () { tone(392, 0.15, 'square', 0, 0.07); tone(784, 0.3, 'square', 0.15, 0.07); },
     count: function () { tone(523, 0.12, 'square', 0, 0.07); },
     fanfare: function () { [523, 659, 784, 1047, 784, 1047].forEach(function (f, i) { tone(f, 0.22, 'triangle', i * 0.12, 0.1); }); },
-    warn: function () { tone(300, 0.2, 'square', 0, 0.08); tone(300, 0.2, 'square', 0.25, 0.08); }
+    warn: function () { tone(300, 0.2, 'square', 0, 0.08); tone(300, 0.2, 'square', 0.25, 0.08); },
+    pop: function () { tone(900, 0.05, 'square', 0, 0.09); tone(300, 0.12, 'triangle', 0.03, 0.08); },
+    bonk: function () { tone(220, 0.08, 'square', 0, 0.1); tone(160, 0.1, 'triangle', 0.05, 0.08); },
+    flip: function () { tone(700, 0.04, 'triangle', 0, 0.05); },
+    spin: function () { tone(1200, 0.02, 'square', 0, 0.03); }
   };
   function toggleMute() { muted = !muted; localStorage.setItem('gb_mute', muted ? '1' : '0'); return muted; }
   function isMuted() { return muted; }
@@ -189,9 +193,34 @@ var U = (function () {
     })(start);
   }
 
+  /* ---------- Login Google (Google Identity Services) ---------- */
+  var gisPromise = null;
+  function loadGis() {
+    if (window.google && window.google.accounts && window.google.accounts.id) return Promise.resolve();
+    if (!gisPromise) {
+      gisPromise = new Promise(function (resolve, reject) {
+        var sc = document.createElement('script');
+        sc.src = 'https://accounts.google.com/gsi/client';
+        sc.async = true;
+        sc.onload = resolve;
+        sc.onerror = function () { gisPromise = null; reject(new Error('Gagal memuat login Google. Periksa koneksi internet.')); };
+        document.head.appendChild(sc);
+      });
+    }
+    return gisPromise;
+  }
+
+  // Hanya untuk tampilan (nama & email). Keabsahan token diperiksa di server.
+  function jwtPayload(token) {
+    try {
+      var b = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      return JSON.parse(decodeURIComponent(escape(atob(b))));
+    } catch (e) { return {}; }
+  }
   return {
     esc: esc, $: $, $$: $$, toast: toast, modal: modal, confirm: confirmBox, copy: copy, download: download, csv: csv,
     excel: excel, fmtTime: fmtTime, fmtDate: fmtDate, toLocalInput: toLocalInput, uid: uid, readFile: readFile,
-    sfx: sfx, toggleMute: toggleMute, isMuted: isMuted, confetti: confetti, countUp: countUp
+    sfx: sfx, toggleMute: toggleMute, isMuted: isMuted, confetti: confetti, countUp: countUp,
+    loadGis: loadGis, jwtPayload: jwtPayload
   };
 })();
