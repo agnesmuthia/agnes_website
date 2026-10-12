@@ -1,7 +1,8 @@
 /* ================== BAGIAN SERVER GOOGLE SHEETS ==================
- * Ganti kata sandi guru di bawah ini sebelum melakukan Deploy!
+ * Kata sandi guru TIDAK ditulis di kode ini. Simpan di:
+ *   Project Settings (ikon roda gigi) > Script Properties > Add script property
+ *   Property: TEACHER_KEY      Value: kata sandi pilihan Anda
  */
-var TEACHER_KEY = 'ganti-kata-sandi-ini';
 var DRIVE_FOLDER = 'Rekap Game Belajar';
 
 var GAME_HEADERS = ['code', 'title', 'subject', 'updatedAt', 'json'];
@@ -85,7 +86,9 @@ function fromResult_(o) {
 
 var SheetsDB = {
   mode: 'sheets',
-  teacherKey: function () { return TEACHER_KEY; },
+  teacherKey: function () {
+    return PropertiesService.getScriptProperties().getProperty('TEACHER_KEY') || '';
+  },
 
   games_: function () { return sheet_('Games', GAME_HEADERS); },
   results_: function () { return sheet_('Results', RESULT_HEADERS); },

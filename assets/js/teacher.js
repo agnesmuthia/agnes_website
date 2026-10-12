@@ -68,6 +68,7 @@ var Teacher = (function () {
       }
       Api.setAuth(k);
       Api.call('ping').then(function (r) {
+        if (r.configured === false) throw new Error('TEACHER_KEY belum diatur di Script Properties Google Apps Script.');
         if (!r.teacher) throw new Error(local ? 'PIN salah.' : 'Kata sandi guru salah.');
         U.toast('Selamat datang! 👋', 'ok');
         route(location.hash.replace(/^#\/guru\/?/, ''));
@@ -914,10 +915,10 @@ var Teacher = (function () {
       '<li>Buka <a href="https://sheets.new" target="_blank" rel="noopener">sheets.new</a> untuk membuat Google Sheets baru, beri nama misalnya <b>Database Game Belajar</b>.</li>' +
       '<li>Klik menu <b>Ekstensi → Apps Script</b>.</li>' +
       '<li>Hapus kode bawaan, lalu salin seluruh isi file <a href="backend/Code.gs" target="_blank">backend/Code.gs</a> dan tempelkan.</li>' +
-      '<li>Ubah baris <code>var TEACHER_KEY = \'ganti-kata-sandi-ini\';</code> menjadi kata sandi Anda sendiri, lalu simpan (ikon 💾).</li>' +
+      '<li>Buka <b>Project Settings</b> (ikon ⚙️ di kiri) → <b>Script Properties</b> → <b>Add script property</b>. Isi <i>Property</i>: <code>TEACHER_KEY</code> dan <i>Value</i>: kata sandi Anda, lalu <b>Save</b>. Kata sandi tidak ditulis di kode.</li>' +
       '<li>Klik <b>Terapkan → Deployment baru</b> → pilih jenis <b>Aplikasi web</b>. Setel <i>Jalankan sebagai:</i> <b>Saya</b>, <i>Yang memiliki akses:</i> <b>Siapa saja</b>. Klik <b>Terapkan</b> dan izinkan aksesnya.</li>' +
       '<li>Salin <b>URL aplikasi web</b> (berakhiran <code>/exec</code>), tempel di kolom di atas, lalu klik <b>Simpan</b>.</li>' +
-      '<li>Keluar lalu masuk lagi menggunakan kata sandi <b>TEACHER_KEY</b>.</li></ol>' +
+      '<li>Keluar lalu masuk lagi menggunakan kata sandi yang Anda isi pada <b>TEACHER_KEY</b>.</li></ol>' +
       '<p class="muted small">Semua nilai tersimpan di Google Sheets tersebut (lembar <b>Results</b>), dan tombol "Simpan ke Google Drive" di Rekap membuat file rekap lengkap dengan diagram di folder <b>Rekap Game Belajar</b>. ' +
       'Jika Anda mengubah Code.gs, buat ulang deployment melalui <b>Terapkan → Kelola deployment → Edit → Versi baru</b>.</p></section>' +
 

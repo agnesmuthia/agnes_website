@@ -21,6 +21,14 @@ var Core = (function () {
 
   function fail(msg) { throw new Error(msg); }
 
+  // Perbandingan tanpa berhenti di karakter pertama yang berbeda.
+  function sameKey(a, b) {
+    a = String(a); b = String(b);
+    var diff = a.length ^ b.length;
+    for (var i = 0; i < Math.max(a.length, b.length); i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+    return diff === 0;
+  }
+
   function needGame(db, code) {
     var g = db.getGame(String(code || '').trim().toUpperCase());
     if (!g) fail('Kode game tidak ditemukan. Periksa kembali kodenya.');
@@ -118,12 +126,13 @@ var Core = (function () {
   function handle(db, req) {
     req = req || {};
     var action = req.action;
-    var isTeacher = !!req.auth && String(req.auth) === String(db.teacherKey());
+    var tkey = db.teacherKey();
+    var isTeacher = !!tkey && !!req.auth && sameKey(req.auth, tkey);
     if (TEACHER_ACTIONS.indexOf(action) >= 0 && !isTeacher) fail('Kata sandi guru salah.');
 
     switch (action) {
       case 'ping':
-        return { mode: db.mode, teacher: isTeacher };
+        return { mode: db.mode, teacher: isTeacher, configured: !!tkey };
 
       case 'getGame': {
         var g = needGame(db, req.code);

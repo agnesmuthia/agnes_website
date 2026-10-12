@@ -37,10 +37,10 @@ Saat pertama kali dibuka, aplikasi berjalan dalam **Mode Lokal**: data tersimpan
 
 1. Buat Google Sheets baru (https://sheets.new), misalnya beri nama **Database Game Belajar**.
 2. Buka menu **Ekstensi → Apps Script**, hapus kode bawaan, lalu tempel seluruh isi [`backend/Code.gs`](backend/Code.gs).
-3. Ganti baris `var TEACHER_KEY = 'ganti-kata-sandi-ini';` dengan kata sandi Anda, lalu simpan.
+3. Buka **Project Settings** (ikon ⚙️) → **Script Properties** → **Add script property**. Isi *Property* `TEACHER_KEY` dan *Value* kata sandi Anda, lalu **Save**. Kata sandi tidak ditulis di dalam kode.
 4. Klik **Terapkan → Deployment baru → Aplikasi web**. Isi *Jalankan sebagai*: **Saya**, dan *Akses*: **Siapa saja**. Klik **Terapkan** dan beri izin.
 5. Salin URL yang berakhiran `/exec`. Di aplikasi buka **Guru → Pengaturan**, tempel URL tersebut, lalu klik **Simpan**.
-6. Masuk kembali dengan kata sandi `TEACHER_KEY`.
+6. Masuk kembali dengan kata sandi yang Anda isi pada `TEACHER_KEY`.
 
 Setelah terhubung:
 - Link/kode game yang dibagikan bisa dibuka siswa dari HP masing-masing.
