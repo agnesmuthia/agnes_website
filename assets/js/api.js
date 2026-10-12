@@ -71,7 +71,7 @@ var Api = (function () {
     }
     // text/plain agar tidak memicu preflight CORS di Google Apps Script.
     return fetch(u, { method: 'POST', body: JSON.stringify(req), headers: { 'Content-Type': 'text/plain;charset=utf-8' } })
-      .catch(function () { throw new Error('Tidak dapat terhubung ke server. Periksa koneksi internet.'); })
+      .catch(function () { throw new Error('Tidak dapat terhubung ke server. Periksa internet, lalu pastikan URL /exec benar dan deployment Apps Script diatur "Yang memiliki akses: Siapa saja (Anyone)".'); })
       .then(function (r) { return r.json(); })
       .then(function (res) {
         if (!res.ok) throw new Error(res.error || 'Terjadi kesalahan di server.');
